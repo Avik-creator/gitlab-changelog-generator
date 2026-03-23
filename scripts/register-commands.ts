@@ -13,14 +13,14 @@ if (!APP_ID || !BOT_TOKEN) {
 }
 
 const MODE_CHOICES = [
-  { name: "✨ Changelog — professional prose", value: "changelog" },
-  { name: "🔧 PR Notes — technical bullets", value: "pr" },
-  { name: "📣 Press Release — stakeholder summary", value: "press-release" },
-  { name: "📝 Release Notes — Features/Fixes/Improvements", value: "release-notes" },
-  { name: "⚡ Concise — 2-sentence TL;DR", value: "concise" },
-  { name: "📊 Manager — impact + blockers + risks", value: "manager" },
-  { name: "🏗️ Engineering — deep technical detail", value: "engineering" },
-  { name: "🎯 Executive — business impact only", value: "executive" },
+  { name: "✨ Changelog — professional prose",       value: "changelog" },
+  { name: "🔧 PR Notes — technical bullets",         value: "pr" },
+  { name: "📣 Press Release — stakeholder summary",  value: "press-release" },
+  { name: "📝 Release Notes — Features/Fixes",       value: "release-notes" },
+  { name: "⚡ Concise — 2-sentence TL;DR",           value: "concise" },
+  { name: "📊 Manager — impact + blockers + risks",  value: "manager" },
+  { name: "🏗️ Engineering — deep technical detail",  value: "engineering" },
+  { name: "🎯 Executive — business impact only",     value: "executive" },
 ];
 
 const commands = [
@@ -28,108 +28,168 @@ const commands = [
     name: "changelog",
     description: "GitLab Changelog Bot",
     options: [
-      // ── generate ─────────────────────────────────────────────────────────
+
+      // ── /changelog generate ────────────────────────────────────────────────
       {
         name: "generate",
-        description: "Generate a changelog (user, project, label, milestone, or everyone)",
+        description: "Generate a changelog for a user, project, label, milestone, or everyone",
         type: 1,
-        options: [
-          { name: "user",      description: "Discord user (default: you)",         type: 6, required: false },
-          { name: "gitlab",    description: "GitLab username directly",            type: 3, required: false },
-          { name: "project",   description: "Project path (e.g. group/project)",   type: 3, required: false },
-          { name: "label",     description: "Filter by label (e.g. backend)",      type: 3, required: false },
-          { name: "milestone", description: "Filter by milestone (e.g. v2.4)",     type: 3, required: false },
-          { name: "all",       description: "Generate for all GitLab group members", type: 5, required: false },
-          { name: "week",      description: "Week: last, this, 2026-W12, 2",      type: 3, required: false },
-          { name: "range",     description: "Range: 7d, 14d, 30d, this-month, last-month, 2026-03", type: 3, required: false },
-          { name: "from",      description: "Start date (YYYY-MM-DD)",             type: 3, required: false },
-          { name: "to",        description: "End date (YYYY-MM-DD)",               type: 3, required: false },
-          { name: "mode",      description: "Output mode",                         type: 3, required: false, choices: MODE_CHOICES },
-          { name: "preview",   description: "Private preview before posting",      type: 5, required: false },
-        ],
-      },
-
-      // ── link ─────────────────────────────────────────────────────────────
-      {
-        name: "link",
-        description: "Link Discord user → GitLab username",
-        type: 1,
-        options: [
-          { name: "user",   description: "Discord user",    type: 6, required: true },
-          { name: "gitlab", description: "GitLab username",  type: 3, required: true },
-        ],
-      },
-
-      // ── unlink ───────────────────────────────────────────────────────────
-      {
-        name: "unlink",
-        description: "Remove Discord ↔ GitLab link",
-        type: 1,
-        options: [
-          { name: "user", description: "Discord user", type: 6, required: true },
-        ],
-      },
-
-      // ── list ─────────────────────────────────────────────────────────────
-      { name: "list", description: "Show GitLab group members + Discord links", type: 1 },
-
-      // ── stats ────────────────────────────────────────────────────────────
-      {
-        name: "stats",
-        description: "Show MR stats, review activity, and contribution metrics",
-        type: 1,
-        options: [
-          { name: "user",   description: "Discord user (default: you)", type: 6, required: false },
-          { name: "gitlab", description: "GitLab username",             type: 3, required: false },
-          { name: "week",   description: "Week: last, this, 2026-W12", type: 3, required: false },
-          { name: "range",  description: "Range: 7d, 14d, 30d, this-month", type: 3, required: false },
-        ],
-      },
-
-      // ── health ───────────────────────────────────────────────────────────
-      { name: "health", description: "Check GitLab, AI, filters, and link status", type: 1 },
-
-      // ── config ───────────────────────────────────────────────────────────
-      {
-        name: "config",
-        description: "Manage filters and preferences",
-        type: 2, // SUB_COMMAND_GROUP
         options: [
           {
-            name: "show",
-            description: "Show your personal config",
-            type: 1,
+            name: "user",
+            description: "Discord user to generate for (default: you)",
+            type: 6,          // USER — built-in Discord user picker
+            required: false,
           },
           {
+            name: "gitlab",
+            description: "GitLab username — type to search group members",
+            type: 3,
+            required: false,
+            autocomplete: true,   // ← live suggestions from GitLab
+          },
+          {
+            name: "project",
+            description: "Project path — type to search group projects",
+            type: 3,
+            required: false,
+            autocomplete: true,   // ← live suggestions from GitLab
+          },
+          {
+            name: "label",
+            description: "Label name — type to search group labels",
+            type: 3,
+            required: false,
+            autocomplete: true,   // ← live suggestions from GitLab
+          },
+          {
+            name: "milestone",
+            description: "Milestone title — type to search group milestones",
+            type: 3,
+            required: false,
+            autocomplete: true,   // ← live suggestions from GitLab
+          },
+          {
+            name: "all",
+            description: "Generate for every active GitLab group member",
+            type: 5,
+            required: false,
+          },
+          {
+            name: "week",
+            description: "Which week — type to see options (last, this, 2026-W12, …)",
+            type: 3,
+            required: false,
+            autocomplete: true,   // ← last 6 weeks as suggestions
+          },
+          {
+            name: "range",
+            description: "Rolling range — type to see options (7d, 30d, this-month, …)",
+            type: 3,
+            required: false,
+            autocomplete: true,   // ← preset ranges as suggestions
+          },
+          {
+            name: "from",
+            description: "Start date (YYYY-MM-DD)",
+            type: 3,
+            required: false,
+          },
+          {
+            name: "to",
+            description: "End date (YYYY-MM-DD)",
+            type: 3,
+            required: false,
+          },
+          {
+            name: "mode",
+            description: "Output mode (default: changelog)",
+            type: 3,
+            required: false,
+            choices: MODE_CHOICES,  // fixed list — no autocomplete needed
+          },
+          {
+            name: "preview",
+            description: "Show private preview with Approve / Discard buttons",
+            type: 5,
+            required: false,
+          },
+        ],
+      },
+
+      // ── /changelog link ───────────────────────────────────────────────────
+      {
+        name: "link",
+        description: "Link a Discord user to their GitLab username",
+        type: 1,
+        options: [
+          { name: "user",   description: "Discord user",                         type: 6, required: true },
+          { name: "gitlab", description: "GitLab username — type to search",     type: 3, required: true, autocomplete: true },
+        ],
+      },
+
+      // ── /changelog unlink ─────────────────────────────────────────────────
+      {
+        name: "unlink",
+        description: "Remove a Discord ↔ GitLab link",
+        type: 1,
+        options: [
+          { name: "user", description: "Discord user to unlink", type: 6, required: true },
+        ],
+      },
+
+      // ── /changelog list ───────────────────────────────────────────────────
+      { name: "list", description: "Show all GitLab group members and who is Discord-linked", type: 1 },
+
+      // ── /changelog stats ──────────────────────────────────────────────────
+      {
+        name: "stats",
+        description: "MR metrics, review activity, and contribution breakdown",
+        type: 1,
+        options: [
+          { name: "user",   description: "Discord user (default: you)",                 type: 6, required: false },
+          { name: "gitlab", description: "GitLab username — type to search",            type: 3, required: false, autocomplete: true },
+          { name: "week",   description: "Which week — type to see options",            type: 3, required: false, autocomplete: true },
+          { name: "range",  description: "Rolling range — type to see options",         type: 3, required: false, autocomplete: true },
+        ],
+      },
+
+      // ── /changelog health ─────────────────────────────────────────────────
+      { name: "health", description: "Check GitLab, AI, filters, and link status", type: 1 },
+
+      // ── /changelog config ─────────────────────────────────────────────────
+      {
+        name: "config",
+        description: "Manage personal filters and preferences",
+        type: 2,
+        options: [
+          { name: "show", description: "Show your config", type: 1 },
+          {
             name: "set",
-            description: "Set a config value (e.g. style, exclude-labels, min-lines)",
+            description: "Set a personal config value",
             type: 1,
             options: [
               {
                 name: "key",
-                description: "Config key",
+                description: "Which setting",
                 type: 3,
                 required: true,
                 choices: [
-                  { name: "style — default output mode",          value: "style" },
-                  { name: "verbosity — brief/normal/detailed",    value: "verbosity" },
-                  { name: "timezone — e.g. Asia/Kolkata",         value: "timezone" },
-                  { name: "exclude-labels — comma-separated",     value: "exclude-labels" },
-                  { name: "include-repos — comma-separated",      value: "include-repos" },
-                  { name: "exclude-repos — comma-separated",      value: "exclude-repos" },
-                  { name: "min-lines — minimum diff size",        value: "min-lines" },
-                  { name: "include-drafts — true/false",          value: "include-drafts" },
-                  { name: "exclude-bots — true/false",            value: "exclude-bots" },
+                  { name: "style — default output mode",         value: "style" },
+                  { name: "verbosity — brief / normal / detailed", value: "verbosity" },
+                  { name: "timezone — e.g. Asia/Kolkata",        value: "timezone" },
+                  { name: "exclude-labels — comma-separated",    value: "exclude-labels" },
+                  { name: "include-repos — comma-separated",     value: "include-repos" },
+                  { name: "exclude-repos — comma-separated",     value: "exclude-repos" },
+                  { name: "min-lines — minimum diff size",       value: "min-lines" },
+                  { name: "include-drafts — true / false",       value: "include-drafts" },
+                  { name: "exclude-bots — true / false",         value: "exclude-bots" },
                 ],
               },
               { name: "value", description: "Value to set", type: 3, required: true },
             ],
           },
-          {
-            name: "global-show",
-            description: "Show global config (admin)",
-            type: 1,
-          },
+          { name: "global-show", description: "Show global bot config (admin)", type: 1 },
           {
             name: "global-set",
             description: "Set a global config value (admin)",
@@ -137,14 +197,14 @@ const commands = [
             options: [
               {
                 name: "key",
-                description: "Config key",
+                description: "Which setting",
                 type: 3,
                 required: true,
                 choices: [
-                  { name: "default-style — global default mode",  value: "default-style" },
-                  { name: "exclude-labels — comma-separated",     value: "exclude-labels" },
-                  { name: "min-lines — minimum diff size",        value: "min-lines" },
-                  { name: "exclude-bots — true/false",            value: "exclude-bots" },
+                  { name: "default-style", value: "default-style" },
+                  { name: "exclude-labels", value: "exclude-labels" },
+                  { name: "min-lines", value: "min-lines" },
+                  { name: "exclude-bots", value: "exclude-bots" },
                 ],
               },
               { name: "value", description: "Value to set", type: 3, required: true },
@@ -152,21 +212,34 @@ const commands = [
           },
         ],
       },
+
     ],
   },
 
-  // ── /release (separate top-level command) ───────────────────────────────────
+  // ── /release (separate top-level command) ──────────────────────────────────
   {
     name: "release",
-    description: "Generate release notes from milestones",
+    description: "Generate milestone-based release notes",
     options: [
       {
         name: "generate",
         description: "Generate release notes for a milestone",
         type: 1,
         options: [
-          { name: "milestone", description: "Milestone title (e.g. v2.4)", type: 3, required: true },
-          { name: "project",   description: "Limit to a specific project", type: 3, required: false },
+          {
+            name: "milestone",
+            description: "Milestone — type to search group milestones",
+            type: 3,
+            required: true,
+            autocomplete: true,   // ← live milestone suggestions
+          },
+          {
+            name: "project",
+            description: "Limit to a specific project — type to search",
+            type: 3,
+            required: false,
+            autocomplete: true,   // ← live project suggestions
+          },
         ],
       },
     ],

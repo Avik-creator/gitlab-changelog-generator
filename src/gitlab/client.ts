@@ -221,6 +221,29 @@ export class GitLabClient {
     } catch { return null; }
   }
 
+  // ─── Labels ─────────────────────────────────────────────────────────────────
+
+  async getGroupLabels(groupId: string): Promise<Array<{ name: string; color: string; description: string | null }>> {
+    try {
+      return await this.paginateAll<{ name: string; color: string; description: string | null }>(
+        `/groups/${groupId}/labels`,
+        { with_counts: "false" }
+      );
+    } catch { return []; }
+  }
+
+  // ─── Milestones ──────────────────────────────────────────────────────────────
+
+  async getGroupMilestones(groupId: string): Promise<Array<{ id: number; title: string; state: string; due_date: string | null }>> {
+    try {
+      return await this.paginateAll<{ id: number; title: string; state: string; due_date: string | null }>(
+        `/groups/${groupId}/milestones`,
+        {},
+        3
+      );
+    } catch { return []; }
+  }
+
   // ─── Tags (for release notes) ──────────────────────────────────────────────
 
   async getProjectTags(projectId: number): Promise<GitLabTag[]> {

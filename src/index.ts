@@ -15,7 +15,7 @@ app.post("/discord/interactions", async (c) => {
   const valid = await verifyDiscordSignature(c.req.raw, rawBody, c.env.DISCORD_PUBLIC_KEY);
   if (!valid) return c.json({ error: "Unauthorized" }, 401);
   const interaction = JSON.parse(rawBody) as DiscordInteraction;
-  return routeInteraction(interaction, c.env, c.executionCtx);
+  return await routeInteraction(interaction, c.env, c.executionCtx);
 });
 
 app.get("/health", (c) => c.json({ ok: true, version: "3.0.0" }));

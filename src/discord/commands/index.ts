@@ -7,26 +7,43 @@ import { handleConfig } from "./config";
 import { handleStats } from "./stats";
 import { handleRelease } from "./release";
 import { buildChangelogEmbed } from "../embeds";
+import { handleAutocomplete } from "../autocomplete";
 
 function getUserId(i: DiscordInteraction): string {
   return i.member?.user.id ?? i.user?.id ?? "";
 }
 
-export function routeInteraction(
+/**
+ * Route an incoming Discord interaction.
+ *
+ * Type 1 = PING            → synchronous PONG
+ * Type 2 = APPLICATION_COMMAND → defer immediately, work in waitUntil
+ * Type 3 = MESSAGE_COMPONENT   → defer UPDATE, work in waitUntil
+ * Type 4 = AUTOCOMPLETE        → must respond synchronously (with actual data)
+ */
+export async function routeInteraction(
   interaction: DiscordInteraction,
   env: Env,
   ctx: ExecutionContext
-): Response {
-  if (interaction.type === 1) return Response.json({ type: InteractionResponseType.PONG });
+): Promise<Response> {
+  // Ping
+  if (interaction.type === 1) {
+    return Response.json({ type: InteractionResponseType.PONG });
+  }
 
-  // Button components
+  // Autocomplete — must respond synchronously with choices
+  if (interaction.type === 4) {
+    return handleAutocomplete(interaction, env);
+  }
+
+  // Button / select components
   if (interaction.type === 3) {
     const customId = interaction.data?.custom_id ?? "";
     ctx.waitUntil(handleComponent(customId, env));
     return Response.json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
   }
 
-  // Slash commands
+  // Slash commands — ACK immediately, do all work in background
   if (interaction.type === 2) {
     const commandName = interaction.data?.name ?? "";
     const options = interaction.data?.options ?? [];
@@ -39,12 +56,18 @@ export function routeInteraction(
 
     if (commandName === "changelog") {
       ctx.waitUntil(dispatchChangelog(subName, subOpts, appId, token, env, userId));
-      return Response.json({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, data: { flags: 64 } });
+      return Response.json({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: 64 },
+      });
     }
 
     if (commandName === "release") {
       ctx.waitUntil(dispatchRelease(subName, subOpts, appId, token, env));
-      return Response.json({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, data: { flags: 64 } });
+      return Response.json({
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: 64 },
+      });
     }
   }
 
@@ -69,8 +92,9 @@ async function dispatchChangelog(
     }
     default:
       await fetch(`https://discord.com/api/v10/webhooks/${appId}/${token}/messages/@original`, {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: `❓ Unknown: \`${sub}\`` }),
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: `❓ Unknown subcommand: \`${sub}\`` }),
       });
   }
 }
@@ -92,6 +116,7 @@ async function handleComponent(customId: string, env: Env): Promise<void> {
     await env.USERS_KV.delete(`preview:${jobKey}`);
     return;
   }
+
   if (action === "changelog_approve") {
     const raw = await env.USERS_KV.get(`preview:${jobKey}`);
     if (!raw) return;
@@ -99,7 +124,10 @@ async function handleComponent(customId: string, env: Env): Promise<void> {
     const embed = buildChangelogEmbed(data);
     await fetch(`https://discord.com/api/v10/channels/${env.DISCORD_CHANGELOG_CHANNEL_ID}/messages`, {
       method: "POST",
-      headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify(embed),
     });
     await env.USERS_KV.delete(`preview:${jobKey}`);
