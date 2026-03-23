@@ -1,72 +1,233 @@
 import { GitLabClient } from "./client";
-import type { Env, ChangelogData, ChangelogFormat } from "../types";
-import { parseWeek } from "../utils/weeks";
+import { applyFilters, assessInputQuality } from "./filters";
+import type {
+  Env, ChangelogData, DigestMode, FilterConfig, ChangelogScope,
+  DateRange, EnrichedMR, UserStats,
+} from "../types";
+import { parseDateRange } from "../utils/weeks";
 
 /**
- * Build a changelog for a single GitLab user over the given ISO week.
- * displayName is whatever label to show (GitLab name, Discord username, etc.)
+ * Build a changelog for a single GitLab user.
  */
 export async function buildChangelogForUser(
   gitlabUsername: string,
   displayName: string,
   env: Env,
-  weekISO: string,
-  format: ChangelogFormat
+  dateRange: DateRange,
+  format: DigestMode,
+  filters: FilterConfig
 ): Promise<ChangelogData> {
-  const week = parseWeek(weekISO);
   const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
 
-  const [mergedMRs, staleMRs] = await Promise.all([
-    client.getEnrichedMRs(env.GITLAB_GROUP_ID, gitlabUsername, week.weekStart, week.weekEnd),
-    client.getEnrichedStaleMRs(env.GITLAB_GROUP_ID, [gitlabUsername]),
+  const [rawMRs, staleMRs, openMRsRaw, reviewActivity] = await Promise.all([
+    client.getMergedMRsByAuthor(env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until)
+      .then((mrs) => client.enrichMRs(mrs)),
+    client.getStaleMRs(env.GITLAB_GROUP_ID, [gitlabUsername]),
+    client.getOpenMRsByAuthor(env.GITLAB_GROUP_ID, gitlabUsername)
+      .then((mrs) => client.enrichMRs(mrs.filter((m) => !m.draft).slice(0, 10))),
+    client.getReviewActivity(env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until)
+      .catch(() => null),
   ]);
+
+  const { passed: mergedMRs, filteredOut } = applyFilters(rawMRs, filters);
+  const inputQuality = assessInputQuality(mergedMRs);
 
   return {
     gitlabUsername,
     displayName,
+    scope: { type: "user", value: gitlabUsername },
+    dateRange,
     mergedMRs,
+    filteredOutCount: filteredOut,
     staleMRs,
+    openMRs: openMRsRaw,
+    reviewActivity,
     aiSummary: "",
-    weekISO: week.weekISO,
-    weekStart: week.weekStart,
-    weekEnd: week.weekEnd,
     format,
+    inputQuality,
+    weekISO: dateRange.isoWeek ?? "",
+    weekStart: dateRange.since,
+    weekEnd: dateRange.until,
   };
 }
 
 /**
- * Build a combined changelog for all members of a GitLab group.
- * Used by the weekly cron and /changelog generate all:true.
+ * Build changelogs for all group members (weekly cron / all:true).
  */
-export async function buildChangelogForGroup(
+export async function buildChangelogsForGroup(
   groupId: string,
   env: Env,
-  weekISO: string,
-  format: ChangelogFormat
+  dateRange: DateRange,
+  format: DigestMode,
+  filters: FilterConfig
 ): Promise<ChangelogData[]> {
-  const week = parseWeek(weekISO);
   const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
-
   const members = await client.getGroupMembers(groupId, true);
 
   return Promise.all(
-    members.map(async (member) => {
-      const [mergedMRs, staleMRs] = await Promise.all([
-        client.getEnrichedMRs(groupId, member.username, week.weekStart, week.weekEnd),
-        client.getEnrichedStaleMRs(groupId, [member.username]),
-      ]);
-
-      return {
-        gitlabUsername: member.username,
-        displayName: member.name,
-        mergedMRs,
-        staleMRs,
-        aiSummary: "",
-        weekISO: week.weekISO,
-        weekStart: week.weekStart,
-        weekEnd: week.weekEnd,
-        format,
-      };
-    })
+    members.map((m) =>
+      buildChangelogForUser(m.username, m.name, env, dateRange, format, filters)
+    )
   );
+}
+
+/**
+ * Build a project-scoped changelog (all authors in one project).
+ */
+export async function buildChangelogForProject(
+  projectPathOrId: string,
+  env: Env,
+  dateRange: DateRange,
+  format: DigestMode,
+  filters: FilterConfig
+): Promise<ChangelogData> {
+  const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
+  const project = await client.findProjectByPath(projectPathOrId);
+  if (!project) throw new Error(`Project not found: ${projectPathOrId}`);
+
+  const rawMRs = await client.getMergedMRsForProject(project.id, dateRange.since, dateRange.until);
+  const enriched = await client.enrichMRs(rawMRs);
+  const { passed: mergedMRs, filteredOut } = applyFilters(enriched, filters);
+  const inputQuality = assessInputQuality(mergedMRs);
+
+  const usernames = [...new Set(mergedMRs.map((mr) => mr.author.username))];
+
+  return {
+    gitlabUsername: "",
+    displayName: project.name,
+    scope: { type: "project", value: project.path_with_namespace },
+    dateRange,
+    mergedMRs,
+    filteredOutCount: filteredOut,
+    staleMRs: await client.getStaleMRs(env.GITLAB_GROUP_ID, usernames),
+    openMRs: [],
+    reviewActivity: null,
+    aiSummary: "",
+    format,
+    inputQuality,
+    weekISO: dateRange.isoWeek ?? "",
+    weekStart: dateRange.since,
+    weekEnd: dateRange.until,
+  };
+}
+
+/**
+ * Build a label-scoped changelog.
+ */
+export async function buildChangelogForLabel(
+  label: string,
+  env: Env,
+  dateRange: DateRange,
+  format: DigestMode,
+  filters: FilterConfig
+): Promise<ChangelogData> {
+  const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
+  const rawMRs = await client.getMergedMRsByLabel(env.GITLAB_GROUP_ID, label, dateRange.since, dateRange.until);
+  const enriched = await client.enrichMRs(rawMRs);
+  const { passed: mergedMRs, filteredOut } = applyFilters(enriched, filters);
+
+  return {
+    gitlabUsername: "",
+    displayName: `Label: ${label}`,
+    scope: { type: "label", value: label },
+    dateRange,
+    mergedMRs,
+    filteredOutCount: filteredOut,
+    staleMRs: [],
+    openMRs: [],
+    reviewActivity: null,
+    aiSummary: "",
+    format,
+    inputQuality: assessInputQuality(mergedMRs),
+    weekISO: dateRange.isoWeek ?? "",
+    weekStart: dateRange.since,
+    weekEnd: dateRange.until,
+  };
+}
+
+/**
+ * Build a milestone-scoped changelog.
+ */
+export async function buildChangelogForMilestone(
+  milestoneTitle: string,
+  env: Env,
+  format: DigestMode,
+  filters: FilterConfig
+): Promise<ChangelogData> {
+  const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
+  const rawMRs = await client.getMergedMRsByMilestone(env.GITLAB_GROUP_ID, milestoneTitle);
+  const enriched = await client.enrichMRs(rawMRs);
+  const { passed: mergedMRs, filteredOut } = applyFilters(enriched, filters);
+
+  const dates = mergedMRs.map((mr) => new Date(mr.merged_at).getTime());
+  const earliest = dates.length ? new Date(Math.min(...dates)) : new Date();
+  const latest = dates.length ? new Date(Math.max(...dates)) : new Date();
+
+  return {
+    gitlabUsername: "",
+    displayName: `Milestone: ${milestoneTitle}`,
+    scope: { type: "milestone", value: milestoneTitle },
+    dateRange: { since: earliest, until: latest, label: milestoneTitle },
+    mergedMRs,
+    filteredOutCount: filteredOut,
+    staleMRs: [],
+    openMRs: [],
+    reviewActivity: null,
+    aiSummary: "",
+    format,
+    inputQuality: assessInputQuality(mergedMRs),
+    weekISO: "",
+    weekStart: earliest,
+    weekEnd: latest,
+  };
+}
+
+/**
+ * Compute stats for a user over a date range.
+ */
+export async function computeUserStats(
+  gitlabUsername: string,
+  displayName: string,
+  env: Env,
+  dateRange: DateRange,
+  filters: FilterConfig
+): Promise<UserStats> {
+  const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
+  const rawMRs = await client.getMergedMRsByAuthor(
+    env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until
+  );
+  const enriched = await client.enrichMRs(rawMRs);
+  const { passed: mergedMRs } = applyFilters(enriched, filters);
+  const reviewActivity = await client.getReviewActivity(
+    env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until
+  ).catch((): null => null);
+
+  let totalAdditions = 0, totalDeletions = 0;
+  const reposSet = new Set<string>();
+  const labelsMap: Record<string, number> = {};
+  let totalMergeHours = 0;
+
+  for (const mr of mergedMRs) {
+    if (mr.diffStats) { totalAdditions += mr.diffStats.additions; totalDeletions += mr.diffStats.deletions; }
+    reposSet.add(mr.projectName);
+    for (const l of mr.labels) labelsMap[l] = (labelsMap[l] ?? 0) + 1;
+    const created = new Date(mr.created_at).getTime();
+    const merged = new Date(mr.merged_at).getTime();
+    totalMergeHours += (merged - created) / 3600000;
+  }
+
+  return {
+    username: gitlabUsername,
+    displayName,
+    mrsMerged: mergedMRs.length,
+    totalAdditions,
+    totalDeletions,
+    reposContributed: [...reposSet],
+    avgTimeToMerge: mergedMRs.length ? Math.round(totalMergeHours / mergedMRs.length) : 0,
+    reviewActivity: reviewActivity ?? {
+      username: gitlabUsername, displayName, reviewsGiven: 0,
+      approvals: 0, commentsLeft: 0, discussionsResolved: 0, reviewedMRs: [],
+    },
+    labelsUsed: labelsMap,
+  };
 }

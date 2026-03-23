@@ -1,23 +1,15 @@
-import type { ChangelogData, ChangelogFormat, GitLabStaleMR, EnrichedMR } from "../types";
-import { formatWeekLabel } from "../utils/weeks";
+import type { ChangelogData, DigestMode, GitLabStaleMR, EnrichedMR, UserStats, ReleaseData } from "../types";
 
-const COLORS: Record<ChangelogFormat, number> & { empty: number; health: number; error: number } = {
-  changelog:       0x2ecc71,
-  pr:              0x3498db,
-  "press-release": 0x9b59b6,
-  "release-notes": 0xe67e22,
-  concise:         0x1abc9c,
-  empty:           0x95a5a6,
-  health:          0x27ae60,
-  error:           0xe74c3c,
+const COLORS: Record<string, number> = {
+  changelog: 0x2ecc71, pr: 0x3498db, "press-release": 0x9b59b6,
+  "release-notes": 0xe67e22, concise: 0x1abc9c, manager: 0xf1c40f,
+  engineering: 0x2c3e50, executive: 0x8e44ad,
+  empty: 0x95a5a6, health: 0x27ae60, error: 0xe74c3c, stats: 0x3498db,
 };
 
-const FORMAT_META: Record<ChangelogFormat, { icon: string; label: string }> = {
-  changelog:       { icon: "✨", label: "AI Summary" },
-  pr:              { icon: "🔧", label: "PR Release Notes" },
-  "press-release": { icon: "📣", label: "Press Release" },
-  "release-notes": { icon: "📝", label: "Release Notes" },
-  concise:         { icon: "⚡", label: "TL;DR" },
+const FORMAT_ICONS: Record<string, string> = {
+  changelog: "✨", pr: "🔧", "press-release": "📣", "release-notes": "📝",
+  concise: "⚡", manager: "📊", engineering: "🏗️", executive: "🎯",
 };
 
 function truncate(text: string, max: number): string {
@@ -28,11 +20,11 @@ function mrLine(mr: EnrichedMR): string {
   const diff = mr.diffStats ? ` \`+${mr.diffStats.additions}/-${mr.diffStats.deletions}\`` : "";
   const labels = mr.labels.length ? ` · ${mr.labels.slice(0, 3).join(", ")}` : "";
   const milestone = mr.milestone ? ` 🏁 ${mr.milestone.title}` : "";
-  return `• [${truncate(mr.title, 60)}](${mr.web_url})${diff}${labels}${milestone}`;
+  return `• [${truncate(mr.title, 55)}](${mr.web_url})${diff}${labels}${milestone}`;
 }
 
 function staleLine(mr: GitLabStaleMR): string {
-  return `• [${truncate(mr.title, 55)}](${mr.web_url}) — **${mr.staleDays}d** stale · \`${mr.projectName}\``;
+  return `• [${truncate(mr.title, 50)}](${mr.web_url}) — **${mr.staleDays}d** ${mr.reason} · \`${mr.projectName}\``;
 }
 
 function groupByProject(mrs: EnrichedMR[]): Map<string, EnrichedMR[]> {
@@ -47,25 +39,30 @@ function groupByProject(mrs: EnrichedMR[]): Map<string, EnrichedMR[]> {
 
 // ─── Main changelog embed ─────────────────────────────────────────────────────
 
-export function buildChangelogEmbed(data: ChangelogData, format: ChangelogFormat = "changelog"): object {
-  const meta = FORMAT_META[format];
-  const hasActivity = data.mergedMRs.length > 0;
-  const color = hasActivity ? COLORS[format] : COLORS.empty;
-  const weekLabel = formatWeekLabel({ weekISO: data.weekISO, weekStart: data.weekStart, weekEnd: data.weekEnd });
+export function buildChangelogEmbed(data: ChangelogData): object {
+  const { format, mergedMRs, staleMRs, openMRs, filteredOutCount, reviewActivity } = data;
+  const hasActivity = mergedMRs.length > 0;
+  const color = hasActivity ? (COLORS[format] ?? COLORS.changelog) : COLORS.empty;
+  const icon = FORMAT_ICONS[format] ?? "✨";
+  const scopeLabel = data.scope.type === "user"
+    ? `${data.displayName}'s`
+    : `${data.displayName}`;
 
   const fields: object[] = [];
 
+  // AI summary
   if (data.aiSummary) {
-    fields.push({ name: `${meta.icon} ${meta.label}`, value: truncate(data.aiSummary, 1024), inline: false });
+    fields.push({ name: `${icon} ${format.replace("-", " ").replace(/\b\w/g, (c) => c.toUpperCase())}`, value: truncate(data.aiSummary, 1024), inline: false });
   }
 
+  // MRs grouped by project
   if (hasActivity) {
-    const grouped = groupByProject(data.mergedMRs);
+    const grouped = groupByProject(mergedMRs);
     let totalAdds = 0, totalDels = 0;
 
     for (const [projectName, mrs] of grouped) {
       fields.push({
-        name: `📦 ${projectName} (${mrs.length} MR${mrs.length > 1 ? "s" : ""})`,
+        name: `📦 ${projectName} (${mrs.length})`,
         value: truncate(mrs.map(mrLine).join("\n"), 1024),
         inline: false,
       });
@@ -74,40 +71,131 @@ export function buildChangelogEmbed(data: ChangelogData, format: ChangelogFormat
       }
     }
 
-    const statParts = [`**${data.mergedMRs.length}** MRs merged`];
-    if (totalAdds + totalDels > 0) statParts.push(`\`+${totalAdds}/-${totalDels}\` lines`);
-    if (grouped.size > 1) statParts.push(`across **${grouped.size}** projects`);
+    // Stats bar
+    const stats = [`**${mergedMRs.length}** MRs merged`];
+    if (totalAdds + totalDels > 0) stats.push(`\`+${totalAdds}/-${totalDels}\``);
+    if (grouped.size > 1) stats.push(`**${grouped.size}** projects`);
+    if (filteredOutCount > 0) stats.push(`${filteredOutCount} filtered out`);
 
     const labelCounts = new Map<string, number>();
-    for (const mr of data.mergedMRs) {
-      for (const l of mr.labels) labelCounts.set(l, (labelCounts.get(l) ?? 0) + 1);
-    }
+    for (const mr of mergedMRs) for (const l of mr.labels) labelCounts.set(l, (labelCounts.get(l) ?? 0) + 1);
     const topLabels = [...labelCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([l]) => l);
-    if (topLabels.length) statParts.push(`Labels: ${topLabels.join(", ")}`);
+    if (topLabels.length) stats.push(topLabels.join(", "));
 
-    fields.push({ name: "📊 Stats", value: statParts.join(" · "), inline: false });
+    fields.push({ name: "📊 Stats", value: stats.join(" · "), inline: false });
   }
 
-  if (data.staleMRs.length > 0) {
-    const lines = data.staleMRs.slice(0, 5).map(staleLine).join("\n");
-    const extra = data.staleMRs.length > 5 ? `\n_...and ${data.staleMRs.length - 5} more_` : "";
-    fields.push({
-      name: `⚠️ Stale Open MRs (${data.staleMRs.length})`,
-      value: truncate(lines + extra, 1024),
-      inline: false,
-    });
+  // Review activity
+  if (reviewActivity && reviewActivity.reviewsGiven > 0) {
+    const parts = [`${reviewActivity.reviewsGiven} reviews`];
+    if (reviewActivity.approvals > 0) parts.push(`${reviewActivity.approvals} approvals`);
+    if (reviewActivity.commentsLeft > 0) parts.push(`${reviewActivity.commentsLeft} comments`);
+    if (reviewActivity.discussionsResolved > 0) parts.push(`${reviewActivity.discussionsResolved} resolved`);
+    fields.push({ name: "🔍 Review Activity", value: parts.join(" · "), inline: false });
+  }
+
+  // Open / in-progress MRs
+  if (openMRs.length > 0) {
+    const lines = openMRs.slice(0, 5).map((mr) =>
+      `• [${truncate(mr.title, 55)}](${mr.web_url}) · \`${mr.projectName}\``
+    ).join("\n");
+    fields.push({ name: `🔄 In Progress (${openMRs.length})`, value: truncate(lines, 1024), inline: false });
+  }
+
+  // Stale / blocked
+  if (staleMRs.length > 0) {
+    const lines = staleMRs.slice(0, 5).map(staleLine).join("\n");
+    const extra = staleMRs.length > 5 ? `\n_+${staleMRs.length - 5} more_` : "";
+    fields.push({ name: `⚠️ Blockers (${staleMRs.length})`, value: truncate(lines + extra, 1024), inline: false });
   }
 
   return {
     embeds: [{
-      title: `📋 ${data.displayName}'s Weekly Changelog`,
-      description: hasActivity ? null : `_No activity found for ${weekLabel}._`,
+      title: `📋 ${scopeLabel} Changelog`,
+      description: hasActivity ? null : `_No activity found for ${data.dateRange.label}._`,
       color,
       fields,
-      footer: { text: `${data.weekISO} · ${weekLabel} · GitLab Changelog Bot` },
+      footer: { text: `${data.weekISO || data.dateRange.label} · ${data.inputQuality} quality · GitLab Changelog Bot` },
       timestamp: new Date().toISOString(),
     }],
   };
+}
+
+// ─── Stats embed ──────────────────────────────────────────────────────────────
+
+export function buildStatsEmbed(stats: UserStats, dateLabel: string): object {
+  const fields = [
+    { name: "📊 MRs Merged", value: String(stats.mrsMerged), inline: true },
+    { name: "📝 Lines Changed", value: `+${stats.totalAdditions}/-${stats.totalDeletions}`, inline: true },
+    { name: "📦 Repos", value: stats.reposContributed.join(", ") || "None", inline: true },
+    { name: "⏱️ Avg Time to Merge", value: `${stats.avgTimeToMerge}h`, inline: true },
+    { name: "🔍 Reviews Given", value: String(stats.reviewActivity.reviewsGiven), inline: true },
+    { name: "✅ Approvals", value: String(stats.reviewActivity.approvals), inline: true },
+    { name: "💬 Comments", value: String(stats.reviewActivity.commentsLeft), inline: true },
+    { name: "🔓 Discussions Resolved", value: String(stats.reviewActivity.discussionsResolved), inline: true },
+  ];
+
+  const topLabels = Object.entries(stats.labelsUsed).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  if (topLabels.length) {
+    fields.push({ name: "🏷️ Top Labels", value: topLabels.map(([l, c]) => `${l} (${c})`).join(", "), inline: false });
+  }
+
+  return {
+    embeds: [{
+      title: `📈 ${stats.displayName}'s Stats`,
+      color: COLORS.stats,
+      fields,
+      footer: { text: dateLabel },
+      timestamp: new Date().toISOString(),
+    }],
+  };
+}
+
+// ─── Release embed ────────────────────────────────────────────────────────────
+
+export function buildReleaseEmbed(release: ReleaseData): object {
+  const fields: object[] = [];
+  if (release.aiSummary) fields.push({ name: "📝 Summary", value: truncate(release.aiSummary, 1024), inline: false });
+
+  const sections = [
+    { name: "🚀 Features", mrs: release.features },
+    { name: "🐛 Bug Fixes", mrs: release.fixes },
+    { name: "🔧 Improvements", mrs: release.improvements },
+    { name: "💥 Breaking Changes", mrs: release.breaking },
+    { name: "🔩 Internal", mrs: release.internal },
+  ];
+
+  for (const { name, mrs } of sections) {
+    if (mrs.length === 0) continue;
+    fields.push({
+      name: `${name} (${mrs.length})`,
+      value: truncate(mrs.map(mrLine).join("\n"), 1024),
+      inline: false,
+    });
+  }
+
+  const total = release.features.length + release.fixes.length + release.improvements.length + release.breaking.length + release.internal.length;
+  fields.push({ name: "📊 Total", value: `${total} changes`, inline: false });
+
+  return {
+    embeds: [{
+      title: `📦 Release: ${release.label}`,
+      color: COLORS["release-notes"],
+      fields,
+      timestamp: new Date().toISOString(),
+    }],
+  };
+}
+
+// ─── Config embed ─────────────────────────────────────────────────────────────
+
+export function buildConfigEmbed(title: string, config: Record<string, unknown>): object {
+  const fields = Object.entries(config).map(([key, val]) => ({
+    name: key,
+    value: `\`${typeof val === "object" ? JSON.stringify(val) : String(val)}\``,
+    inline: true,
+  }));
+  return { embeds: [{ title: `⚙️ ${title}`, color: 0xf39c12, fields, timestamp: new Date().toISOString() }] };
 }
 
 // ─── Utility embeds ───────────────────────────────────────────────────────────
@@ -125,20 +213,13 @@ export function buildUserListEmbed(
   groupMembers: Array<{ username: string; name: string }>
 ): object {
   const mappedUsernames = new Set(mappings.map((m) => m.gitlabUsername));
-
-  const linkedRows = mappings
-    .map((m) => `• <@${m.discordId}> → \`${m.gitlabUsername}\``)
-    .join("\n");
-
-  // Show GitLab members who haven't been linked to a Discord account yet
-  const unlinked = groupMembers.filter((gm) => !mappedUsernames.has(gm.username));
-  const unlinkedRows = unlinked
-    .map((gm) => `• \`${gm.username}\` (${gm.name}) — _not linked_`)
-    .join("\n");
+  const linked = mappings.map((m) => `• <@${m.discordId}> → \`${m.gitlabUsername}\``).join("\n");
+  const unlinked = groupMembers.filter((g) => !mappedUsernames.has(g.username))
+    .map((g) => `• \`${g.username}\` (${g.name})`).join("\n");
 
   const fields = [];
-  if (linkedRows) fields.push({ name: `🔗 Linked (${mappings.length})`, value: truncate(linkedRows, 1024), inline: false });
-  if (unlinkedRows) fields.push({ name: `🦊 GitLab-only (${unlinked.length})`, value: truncate(unlinkedRows, 1024), inline: false });
+  if (linked) fields.push({ name: `🔗 Linked (${mappings.length})`, value: truncate(linked, 1024), inline: false });
+  if (unlinked) fields.push({ name: `🦊 GitLab-only`, value: truncate(unlinked, 1024), inline: false });
 
   return {
     embeds: [{
@@ -146,27 +227,29 @@ export function buildUserListEmbed(
       description: fields.length === 0 ? "_No members found._" : null,
       color: COLORS.health,
       fields,
-      footer: { text: `${groupMembers.length} GitLab member(s) · ${mappings.length} Discord-linked` },
+      footer: { text: `${groupMembers.length} GitLab · ${mappings.length} linked` },
     }],
   };
 }
 
 export function buildHealthEmbed(stats: {
-  mappingCount: number;
-  gitlabMemberCount: number;
-  gitlabOk: boolean;
-  aiOk: boolean;
+  mappingCount: number; gitlabMemberCount: number; gitlabOk: boolean; aiOk: boolean;
+  configuredFilters: string[];
 }): object {
+  const fields = [
+    { name: "🦊 GitLab members", value: String(stats.gitlabMemberCount), inline: true },
+    { name: "🔗 Discord-linked", value: String(stats.mappingCount), inline: true },
+    { name: "🦊 GitLab API", value: stats.gitlabOk ? "✅ OK" : "❌ Error", inline: true },
+    { name: "🤖 Workers AI", value: stats.aiOk ? "✅ OK" : "❌ Error", inline: true },
+  ];
+  if (stats.configuredFilters.length > 0) {
+    fields.push({ name: "🔧 Active filters", value: stats.configuredFilters.join(", "), inline: false });
+  }
   return {
     embeds: [{
       title: "🏥 Changelog Bot Health",
       color: stats.gitlabOk && stats.aiOk ? COLORS.health : COLORS.error,
-      fields: [
-        { name: "🦊 GitLab members", value: String(stats.gitlabMemberCount), inline: true },
-        { name: "🔗 Discord-linked", value: String(stats.mappingCount), inline: true },
-        { name: "🦊 GitLab API", value: stats.gitlabOk ? "✅ OK" : "❌ Error", inline: true },
-        { name: "🤖 Workers AI", value: stats.aiOk ? "✅ OK" : "❌ Error", inline: true },
-      ],
+      fields,
       timestamp: new Date().toISOString(),
     }],
   };

@@ -2,10 +2,11 @@ import { Hono } from "hono";
 import type { Env, DiscordInteraction } from "./types";
 import { verifyDiscordSignature } from "./discord/interactions";
 import { routeInteraction } from "./discord/commands/index";
-import { buildChangelogForGroup } from "./gitlab/changelog";
+import { buildChangelogsForGroup } from "./gitlab/changelog";
 import { generateAISummary } from "./ai/summarize";
 import { buildChangelogEmbed } from "./discord/embeds";
-import { parseWeek } from "./utils/weeks";
+import { parseDateRange } from "./utils/weeks";
+import { getGlobalConfig, resolveFilters } from "./kv/config";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -13,12 +14,11 @@ app.post("/discord/interactions", async (c) => {
   const rawBody = await c.req.text();
   const valid = await verifyDiscordSignature(c.req.raw, rawBody, c.env.DISCORD_PUBLIC_KEY);
   if (!valid) return c.json({ error: "Unauthorized" }, 401);
-
   const interaction = JSON.parse(rawBody) as DiscordInteraction;
   return routeInteraction(interaction, c.env, c.executionCtx);
 });
 
-app.get("/health", (c) => c.json({ ok: true, version: "2.1.0" }));
+app.get("/health", (c) => c.json({ ok: true, version: "3.0.0" }));
 
 export default {
   fetch: app.fetch,
@@ -28,20 +28,27 @@ export default {
   },
 };
 
-// ─── Weekly cron — pulls members straight from GitLab, no registry ───────────
-
 async function runWeeklyChangelogs(env: Env): Promise<void> {
-  const week = parseWeek("last");
+  const globalConfig = await getGlobalConfig(env.USERS_KV);
+  const filters = resolveFilters(globalConfig);
+  const dateRange = parseDateRange({ week: "last" });
 
-  // One API call gets all group members — that's our user list
-  const changelogs = await buildChangelogForGroup(env.GITLAB_GROUP_ID, env, week.weekISO, "changelog");
+  const changelogs = await buildChangelogsForGroup(
+    env.GITLAB_GROUP_ID, env, dateRange, globalConfig.defaultStyle, filters
+  );
+
+  let posted = 0;
+  let failed = 0;
 
   for (const data of changelogs) {
     try {
-      data.aiSummary = await generateAISummary(env.AI, data, "changelog");
-      const embed = buildChangelogEmbed(data, "changelog");
+      // Skip users with zero activity AND zero blockers (noise reduction)
+      if (data.mergedMRs.length === 0 && data.staleMRs.length === 0 && data.openMRs.length === 0) continue;
 
-      await fetch(`https://discord.com/api/v10/channels/${env.DISCORD_CHANGELOG_CHANNEL_ID}/messages`, {
+      data.aiSummary = await generateAISummary(env.AI, data, globalConfig.defaultStyle);
+      const embed = buildChangelogEmbed(data);
+
+      const res = await fetch(`https://discord.com/api/v10/channels/${env.DISCORD_CHANGELOG_CHANNEL_ID}/messages`, {
         method: "POST",
         headers: {
           Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
@@ -49,8 +56,14 @@ async function runWeeklyChangelogs(env: Env): Promise<void> {
         },
         body: JSON.stringify(embed),
       });
+
+      if (res.ok) posted++;
+      else { failed++; console.error(`Weekly post failed for ${data.gitlabUsername}: ${res.status}`); }
     } catch (err) {
+      failed++;
       console.error(`Weekly changelog failed for ${data.gitlabUsername}:`, err);
     }
   }
+
+  console.log(`Weekly run complete: ${posted} posted, ${failed} failed, ${changelogs.length} total members`);
 }
