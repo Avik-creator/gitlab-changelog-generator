@@ -115,6 +115,13 @@ const commands = [
             required: false,
           },
           {
+            name: "team",
+            description: "Named team to generate for — type to see configured teams",
+            type: 3,
+            required: false,
+            autocomplete: true,
+          },
+          {
             name: "thread",
             description: "Post all changelogs in a thread (use with all:true)",
             type: 5,
@@ -193,6 +200,89 @@ const commands = [
 
       // ── /changelog health ─────────────────────────────────────────────────
       { name: "health", description: "Check GitLab, AI, filters, and link status", type: 1 },
+
+      // ── /changelog admin ──────────────────────────────────────────────────
+      {
+        name: "admin",
+        description: "Admin and operational commands",
+        type: 2,
+        options: [
+          {
+            name: "last-run",
+            description: "Show stats from the last weekly cron run",
+            type: 1,
+          },
+          {
+            name: "sync-users",
+            description: "Show which GitLab group members are linked and unlinked",
+            type: 1,
+          },
+          {
+            name: "dry-run",
+            description: "Preview what would be generated for a user without posting",
+            type: 1,
+            options: [
+              { name: "gitlab", description: "GitLab username — type to search", type: 3, required: false, autocomplete: true },
+              { name: "week",   description: "Which week",                       type: 3, required: false, autocomplete: true },
+            ],
+          },
+          {
+            name: "test-post",
+            description: "Post a test message to the changelog channel to verify bot permissions",
+            type: 1,
+          },
+        ],
+      },
+
+      // ── /changelog team ───────────────────────────────────────────────────
+      {
+        name: "team",
+        description: "Manage named sub-teams for targeted changelogs",
+        type: 2,
+        options: [
+          {
+            name: "create",
+            description: "Create or update a team",
+            type: 1,
+            options: [
+              { name: "name",    description: "Team name (e.g. platform)",                       type: 3, required: true },
+              { name: "members", description: "GitLab usernames, comma-separated",               type: 3, required: true },
+              { name: "channel", description: "Discord channel ID for weekly auto-posts",        type: 3, required: false },
+            ],
+          },
+          {
+            name: "list",
+            description: "List all configured teams",
+            type: 1,
+          },
+          {
+            name: "delete",
+            description: "Delete a team",
+            type: 1,
+            options: [
+              { name: "name", description: "Team name to delete", type: 3, required: true },
+            ],
+          },
+          {
+            name: "add-member",
+            description: "Add a member to a team",
+            type: 1,
+            options: [
+              { name: "name",   description: "Team name",          type: 3, required: true },
+              { name: "member", description: "GitLab username",    type: 3, required: true },
+            ],
+          },
+          {
+            name: "remove-member",
+            description: "Remove a member from a team",
+            type: 1,
+            options: [
+              { name: "name",   description: "Team name",          type: 3, required: true },
+              { name: "member", description: "GitLab username",    type: 3, required: true },
+            ],
+          },
+        ],
+      },
 
       // ── /changelog config ─────────────────────────────────────────────────
       {

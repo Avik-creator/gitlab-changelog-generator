@@ -2,6 +2,18 @@ import type { ChangelogData, DigestMode, EnrichedMR, ReleaseData } from "../type
 
 const MODEL = "@cf/zai-org/glm-4.7-flash";
 
+// ─── Verbosity modifiers ─────────────────────────────────────────────────────
+
+type Verbosity = "brief" | "normal" | "detailed";
+
+function verbosityInstruction(v: Verbosity | undefined): string {
+  switch (v) {
+    case "brief":    return "IMPORTANT: Keep your entire response under 100 words. Be telegraphic.";
+    case "detailed": return "IMPORTANT: Be thorough. Include specific file names, component names, and explain the 'why' behind major changes where you can infer it.";
+    default:         return "";
+  }
+}
+
 // ─── MR context builder ──────────────────────────────────────────────────────
 
 function buildMRContext(mrs: EnrichedMR[]): string {
@@ -45,70 +57,78 @@ function buildBlockerContext(data: ChangelogData): string {
 
 // ─── Prompt factory (all 8 modes) ────────────────────────────────────────────
 
-function buildPrompt(data: ChangelogData, mode: DigestMode): { system: string; user: string } {
-  const context = buildMRContext(data.mergedMRs);
-  const blockers = buildBlockerContext(data);
+function buildPrompt(
+  data: ChangelogData,
+  mode: DigestMode,
+  verbosity?: Verbosity
+): { system: string; user: string } {
+  const context      = buildMRContext(data.mergedMRs);
+  const blockers     = buildBlockerContext(data);
+  const verbosityHint = verbosityInstruction(verbosity);
   const who = data.scope.type === "user"
     ? `**${data.displayName}**`
     : `**${data.displayName}** (${data.scope.type}: ${data.scope.value})`;
-  const dateLabel = data.dateRange.label;
+  const dateLabel   = data.dateRange.label;
   const fullContext = [context, blockers].filter(Boolean).join("\n\n---\n\n");
 
   if (data.mergedMRs.length === 0 && data.openMRs.length === 0) {
     return {
       system: "You are a concise technical writer.",
-      user: `${who} had no merged MR activity for ${dateLabel}. ${data.staleMRs.length > 0 ? `They have ${data.staleMRs.length} stale open MR(s).` : ""} Write one sentence.`,
+      user: `${who} had no merged MR activity for ${dateLabel}. ${data.staleMRs.length > 0 ? `They have ${data.staleMRs.length} stale open MR(s).` : ""} Write one sentence. ${verbosityHint}`,
     };
   }
+
+  // Append verbosity instruction to each user prompt
+  const vNote = verbosityHint ? `\n\n${verbosityHint}` : "";
 
   switch (mode) {
     case "pr":
       return {
         system: "You are a senior engineer writing internal PR release notes. Be technical, precise, use bullet points grouped by project/theme. Past tense. No fluff.",
-        user: `Write **PR release notes** for ${who} (${dateLabel}).\n- Bullet points grouped by project.\n- Note diff sizes for large changes (>200 lines).\n- Include blockers/risk if present.\n\n${fullContext}`,
+        user: `Write **PR release notes** for ${who} (${dateLabel}).\n- Bullet points grouped by project.\n- Note diff sizes for large changes (>200 lines).\n- Include blockers/risk if present.\n\n${fullContext}${vNote}`,
       };
 
     case "press-release":
       return {
         system: "You are a product marketing manager writing external-facing announcements. Clear, exciting, non-technical. Focus on user/business impact.",
-        user: `Write a **press release** (2–3 sentences) for ${who}'s work (${dateLabel}). Frame around what users gain. Present tense.\n\n${fullContext}`,
+        user: `Write a **press release** (2–3 sentences) for ${who}'s work (${dateLabel}). Frame around what users gain. Present tense.\n\n${fullContext}${vNote}`,
       };
 
     case "release-notes":
       return {
         system: "You are a product manager writing structured release notes. Group by: ## Features, ## Improvements, ## Fixes, ## Breaking Changes. Skip empty sections.",
-        user: `Write **structured release notes** for ${who} (${dateLabel}). One bullet per item, one sentence each.\n\n${fullContext}`,
+        user: `Write **structured release notes** for ${who} (${dateLabel}). One bullet per item, one sentence each.\n\n${fullContext}${vNote}`,
       };
 
     case "concise":
       return {
         system: "You are a busy engineering manager. Write a TL;DR.",
-        user: `Write a **2-sentence TL;DR** for ${who}'s work (${dateLabel}). Mention total MRs. If there are blockers, mention the most critical one.\n\n${fullContext}`,
+        user: `Write a **2-sentence TL;DR** for ${who}'s work (${dateLabel}). Mention total MRs. If there are blockers, mention the most critical one.\n\n${fullContext}${vNote}`,
       };
 
     case "manager":
       return {
         system: "You are an engineering manager writing a weekly summary for leadership. Focus on: impact, cross-team dependencies, blockers, risks, and follow-up items. Be structured and clear.",
-        user: `Write a **manager-level summary** for ${who} (${dateLabel}) with these sections:\n## What Shipped\n## Key Impact\n## Blockers & Risks\n## Follow-up Needed\n\nSkip empty sections. Be concrete — link themes to business context.\n\n${fullContext}`,
+        user: `Write a **manager-level summary** for ${who} (${dateLabel}) with these sections:\n## What Shipped\n## Key Impact\n## Blockers & Risks\n## Follow-up Needed\n\nSkip empty sections. Be concrete — link themes to business context.\n\n${fullContext}${vNote}`,
       };
 
     case "engineering":
       return {
         system: "You are a senior staff engineer writing a detailed technical summary. Include architecture implications, notable patterns, and technical debt signals. Be specific about what changed and why.",
-        user: `Write a **deep technical summary** for ${who} (${dateLabel}).\n- Group by system area or project.\n- Note architectural changes, new patterns, refactors.\n- Flag potential tech debt.\n- Mention review activity if present.\n\n${fullContext}`,
+        user: `Write a **deep technical summary** for ${who} (${dateLabel}).\n- Group by system area or project.\n- Note architectural changes, new patterns, refactors.\n- Flag potential tech debt.\n- Mention review activity if present.\n\n${fullContext}${vNote}`,
       };
 
     case "executive":
       return {
         system: "You are a VP of Engineering writing a high-level summary for C-suite. Focus exclusively on business impact, strategic alignment, and risk. No technical jargon. 2–3 sentences max.",
-        user: `Write an **executive summary** (2–3 sentences) for ${who} (${dateLabel}). What moved the needle for the business? Any risks?\n\n${fullContext}`,
+        user: `Write an **executive summary** (2–3 sentences) for ${who} (${dateLabel}). What moved the needle for the business? Any risks?\n\n${fullContext}${vNote}`,
       };
 
     case "changelog":
     default:
       return {
         system: "You are a technical changelog writer. Write clear, professional summaries with structure.",
-        user: `Write a **changelog** for ${who} (${dateLabel}) with these sections:\n## What Shipped\nProse summary (2–3 sentences) of what was delivered and its impact.\n## Notable Changes\nBullet points of the most significant MRs (max 5).\n## Blockers\nAny stale MRs or items needing attention (or "None").\n\n${fullContext}`,
+        user: `Write a **changelog** for ${who} (${dateLabel}) with these sections:\n## What Shipped\nProse summary (2–3 sentences) of what was delivered and its impact.\n## Notable Changes\nBullet points of the most significant MRs (max 5).\n## Blockers\nAny stale MRs or items needing attention (or "None").\n\n${fullContext}${vNote}`,
       };
   }
 }
@@ -143,7 +163,8 @@ function buildDeterministicSummary(data: ChangelogData): string {
 export async function generateAISummary(
   ai: Ai,
   data: ChangelogData,
-  mode: DigestMode = "changelog"
+  mode: DigestMode = "changelog",
+  verbosity?: "brief" | "normal" | "detailed"
 ): Promise<string> {
   // Confidence gate: only skip AI for truly low quality (all garbage titles, no content)
   if (data.inputQuality === "low" && data.mergedMRs.length > 0) {
@@ -151,7 +172,7 @@ export async function generateAISummary(
   }
   // For medium/high quality, always attempt AI (MR titles alone are enough context)
 
-  const { system, user } = buildPrompt(data, mode);
+  const { system, user } = buildPrompt(data, mode, verbosity);
 
   try {
     const response = (await (ai as Ai).run(MODEL as Parameters<Ai["run"]>[0], {

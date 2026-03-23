@@ -9,32 +9,47 @@ import type {
   EnrichedMR,
   ReviewActivity,
 } from "../types";
+import { withRetry } from "../utils/retry";
 
-const MAX_PAGES = 10;
+const MAX_PAGES  = 10;
 const STALE_DAYS = 7;
+
+// Max reviewed MRs for which we fetch notes to count approvals/comments
+const REVIEW_NOTE_CAP = 5;
+// Max stale MRs for which we check latest pipeline status
+const PIPELINE_CHECK_CAP = 5;
 
 export class GitLabClient {
   private baseUrl: string;
-  private token: string;
+  private token:   string;
 
   constructor(baseUrl: string, token: string) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
-    this.token = token;
+    this.token   = token;
   }
+
+  // ─── Core fetch with retry + backoff ──────────────────────────────────────
 
   private async fetch<T>(path: string, params: Record<string, string> = {}): Promise<T> {
-    const qs = new URLSearchParams(params).toString();
-    const url = `${this.baseUrl}/api/v4${path}${qs ? `?${qs}` : ""}`;
-    const res = await fetch(url, {
-      headers: { "PRIVATE-TOKEN": this.token },
+    return withRetry(async () => {
+      const qs  = new URLSearchParams(params).toString();
+      const url = `${this.baseUrl}/api/v4${path}${qs ? `?${qs}` : ""}`;
+      const res = await fetch(url, { headers: { "PRIVATE-TOKEN": this.token } });
+
+      if (res.status === 429) {
+        const retryAfter = res.headers.get("Retry-After");
+        throw new Error(`GitLab API 429 Retry-After: ${retryAfter ?? "2"} ${path}`);
+      }
+      if (!res.ok) throw new Error(`GitLab API ${res.status}: ${path}`);
+      return res.json() as Promise<T>;
     });
-    if (!res.ok) {
-      throw new Error(`GitLab API ${res.status}: ${path}`);
-    }
-    return res.json() as Promise<T>;
   }
 
-  private async paginateAll<T>(path: string, params: Record<string, string> = {}, maxPages = MAX_PAGES): Promise<T[]> {
+  private async paginateAll<T>(
+    path: string,
+    params: Record<string, string> = {},
+    maxPages = MAX_PAGES
+  ): Promise<T[]> {
     const all: T[] = [];
     for (let page = 1; page <= maxPages; page++) {
       const batch = await this.fetch<T[]>(path, { ...params, per_page: "100", page: String(page) });
@@ -45,7 +60,7 @@ export class GitLabClient {
     return all;
   }
 
-  // ─── Group members ──────────────────────────────────────────────────────────
+  // ─── Group members ─────────────────────────────────────────────────────────
 
   async getGroupMembers(groupId: string, includeSubgroups = true): Promise<GitLabMember[]> {
     const path = includeSubgroups ? `/groups/${groupId}/members/all` : `/groups/${groupId}/members`;
@@ -53,7 +68,7 @@ export class GitLabClient {
     return members.filter((m) => m.state === "active");
   }
 
-  /** Single-page member fetch for autocomplete (one API call, stays within 3s deadline). */
+  /** Single-page member fetch for autocomplete (one API call, stays within 3 s deadline). */
   async getGroupMembersForAutocomplete(groupId: string): Promise<GitLabMember[]> {
     const members = await this.fetch<GitLabMember[]>(`/groups/${groupId}/members/all`, {
       per_page: "100",
@@ -64,12 +79,10 @@ export class GitLabClient {
 
   /** Single-page label fetch for autocomplete. */
   async getGroupLabelsForAutocomplete(groupId: string): Promise<Array<{ name: string }>> {
-    return this.fetch<Array<{ name: string }>>(`/groups/${groupId}/labels`, {
-      per_page: "100",
-    });
+    return this.fetch<Array<{ name: string }>>(`/groups/${groupId}/labels`, { per_page: "100" });
   }
 
-  // ─── Merge requests (merged) ────────────────────────────────────────────────
+  // ─── Merge requests (merged) ───────────────────────────────────────────────
 
   async getMergedMRsByAuthor(
     groupId: string,
@@ -92,7 +105,6 @@ export class GitLabClient {
     });
   }
 
-  /** Fetch merged MRs for the whole group (any author). */
   async getMergedMRsForGroup(groupId: string, since: Date, until: Date): Promise<GitLabMR[]> {
     const fetchSince = new Date(since);
     fetchSince.setDate(fetchSince.getDate() - 30);
@@ -108,7 +120,6 @@ export class GitLabClient {
     });
   }
 
-  /** Fetch merged MRs for a specific project. */
   async getMergedMRsForProject(projectId: number, since: Date, until: Date): Promise<GitLabMR[]> {
     const fetchSince = new Date(since);
     fetchSince.setDate(fetchSince.getDate() - 30);
@@ -124,7 +135,6 @@ export class GitLabClient {
     });
   }
 
-  /** Fetch merged MRs by milestone title (across group). */
   async getMergedMRsByMilestone(groupId: string, milestoneTitle: string): Promise<GitLabMR[]> {
     return this.paginateAll<GitLabMR>(`/groups/${groupId}/merge_requests`, {
       state: "merged",
@@ -132,8 +142,12 @@ export class GitLabClient {
     });
   }
 
-  /** Fetch merged MRs filtered by label (across group). */
-  async getMergedMRsByLabel(groupId: string, labels: string, since: Date, until: Date): Promise<GitLabMR[]> {
+  async getMergedMRsByLabel(
+    groupId: string,
+    labels: string,
+    since: Date,
+    until: Date
+  ): Promise<GitLabMR[]> {
     const fetchSince = new Date(since);
     fetchSince.setDate(fetchSince.getDate() - 30);
 
@@ -149,7 +163,7 @@ export class GitLabClient {
     });
   }
 
-  // ─── Open MRs (stale / blocked / WIP) ────────────────────────────────────
+  // ─── Open / stale MRs ──────────────────────────────────────────────────────
 
   async getOpenMRsByAuthor(groupId: string, gitlabUsername: string): Promise<GitLabMR[]> {
     return this.paginateAll<GitLabMR>(`/groups/${groupId}/merge_requests`, {
@@ -158,11 +172,24 @@ export class GitLabClient {
     }, 3);
   }
 
+  /** Latest pipeline status for an MR. Returns null if no pipelines or request fails. */
+  async getLatestPipelineStatus(projectId: number, mrIid: number): Promise<string | null> {
+    try {
+      const pipelines = await this.fetch<Array<{ id: number; status: string }>>(
+        `/projects/${projectId}/merge_requests/${mrIid}/pipelines`,
+        { per_page: "1" }
+      );
+      return pipelines[0]?.status ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async getStaleMRs(groupId: string, usernames: string[]): Promise<GitLabStaleMR[]> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - STALE_DAYS);
-    const now = Date.now();
-    const projectCache = new Map<number, GitLabProject | null>();
+    const now            = Date.now();
+    const projectCache   = new Map<number, GitLabProject | null>();
     const all: GitLabStaleMR[] = [];
 
     for (const username of usernames) {
@@ -175,29 +202,38 @@ export class GitLabClient {
         if (!projectCache.has(mr.project_id)) {
           projectCache.set(mr.project_id, await this.getProject(mr.project_id));
         }
-        const project = projectCache.get(mr.project_id);
+        const project   = projectCache.get(mr.project_id);
         const staleDays = Math.floor((now - updatedAt.getTime()) / 86400000);
 
         all.push({
-          id: mr.id,
-          iid: mr.iid,
-          title: mr.title,
-          web_url: mr.web_url,
+          id:            mr.id,
+          iid:           mr.iid,
+          title:         mr.title,
+          web_url:       mr.web_url,
           source_branch: mr.source_branch,
-          updated_at: mr.updated_at,
-          author: mr.author,
-          project_id: mr.project_id,
-          projectName: project?.name ?? `Project ${mr.project_id}`,
+          updated_at:    mr.updated_at,
+          author:        mr.author,
+          project_id:    mr.project_id,
+          projectName:   project?.name ?? `Project ${mr.project_id}`,
           staleDays,
           reason: staleDays > 14 ? "stale" : "review-stuck",
         });
       }
     }
 
-    return all.sort((a, b) => b.staleDays - a.staleDays);
+    // Sort by staleness; then enrich the worst offenders with pipeline status (capped)
+    all.sort((a, b) => b.staleDays - a.staleDays);
+
+    const toCheck = all.slice(0, PIPELINE_CHECK_CAP);
+    for (const smr of toCheck) {
+      const status = await this.getLatestPipelineStatus(smr.project_id, smr.iid);
+      if (status === "failed") smr.reason = "pipeline-failed";
+    }
+
+    return all;
   }
 
-  // ─── Commits + diff stats ──────────────────────────────────────────────────
+  // ─── Commits + diff stats ─────────────────────────────────────────────────
 
   async getCommitsForMR(projectId: number, mrIid: number): Promise<GitLabCommit[]> {
     try {
@@ -208,7 +244,10 @@ export class GitLabClient {
     } catch { return []; }
   }
 
-  async getDiffStats(projectId: number, mrIid: number): Promise<{ additions: number; deletions: number } | null> {
+  async getDiffStats(
+    projectId: number,
+    mrIid: number
+  ): Promise<{ additions: number; deletions: number } | null> {
     try {
       const mr = await this.fetch<{
         diff_stats?: { additions: number; deletions: number };
@@ -219,23 +258,19 @@ export class GitLabClient {
     } catch { return null; }
   }
 
-  // ─── Projects ───────────────────────────────────────────────────────────────
+  // ─── Projects ─────────────────────────────────────────────────────────────
 
   async getProject(projectId: number): Promise<GitLabProject | null> {
-    try {
-      return await this.fetch<GitLabProject>(`/projects/${projectId}`);
-    } catch { return null; }
+    try { return await this.fetch<GitLabProject>(`/projects/${projectId}`); }
+    catch { return null; }
   }
 
   async getGroupProjects(groupId: string): Promise<GitLabProject[]> {
-    return this.paginateAll<GitLabProject>(`/groups/${groupId}/projects`, { include_subgroups: "true" });
+    return this.paginateAll<GitLabProject>(`/groups/${groupId}/projects`, {
+      include_subgroups: "true",
+    });
   }
 
-  /**
-   * Single-page project fetch for autocomplete.
-   * Returns up to 100 projects ordered by most recent activity — one API call, fast enough
-   * to fit within Discord's 3-second autocomplete deadline.
-   */
   async getGroupProjectsForAutocomplete(groupId: string): Promise<GitLabProject[]> {
     return this.fetch<GitLabProject[]>(`/groups/${groupId}/projects`, {
       include_subgroups: "true",
@@ -246,14 +281,15 @@ export class GitLabClient {
   }
 
   async findProjectByPath(pathOrName: string): Promise<GitLabProject | null> {
-    try {
-      return await this.fetch<GitLabProject>(`/projects/${encodeURIComponent(pathOrName)}`);
-    } catch { return null; }
+    try { return await this.fetch<GitLabProject>(`/projects/${encodeURIComponent(pathOrName)}`); }
+    catch { return null; }
   }
 
-  // ─── Labels ─────────────────────────────────────────────────────────────────
+  // ─── Labels ───────────────────────────────────────────────────────────────
 
-  async getGroupLabels(groupId: string): Promise<Array<{ name: string; color: string; description: string | null }>> {
+  async getGroupLabels(
+    groupId: string
+  ): Promise<Array<{ name: string; color: string; description: string | null }>> {
     try {
       return await this.paginateAll<{ name: string; color: string; description: string | null }>(
         `/groups/${groupId}/labels`,
@@ -262,32 +298,34 @@ export class GitLabClient {
     } catch { return []; }
   }
 
-  // ─── Milestones ──────────────────────────────────────────────────────────────
+  // ─── Milestones ───────────────────────────────────────────────────────────
 
-  async getGroupMilestones(groupId: string): Promise<Array<{ id: number; title: string; state: string; due_date: string | null }>> {
+  async getGroupMilestones(
+    groupId: string
+  ): Promise<Array<{ id: number; title: string; state: string; due_date: string | null }>> {
     try {
-      return await this.paginateAll<{ id: number; title: string; state: string; due_date: string | null }>(
-        `/groups/${groupId}/milestones`,
-        {},
-        3
-      );
+      return await this.paginateAll<{
+        id: number; title: string; state: string; due_date: string | null;
+      }>(`/groups/${groupId}/milestones`, {}, 3);
     } catch { return []; }
   }
 
-  // ─── Tags (for release notes) ──────────────────────────────────────────────
+  // ─── Tags ────────────────────────────────────────────────────────────────
 
   async getProjectTags(projectId: number): Promise<GitLabTag[]> {
     return this.paginateAll<GitLabTag>(`/projects/${projectId}/repository/tags`, {}, 3);
   }
 
-  // ─── Review activity ────────────────────────────────────────────────────────
+  // ─── Review activity ─────────────────────────────────────────────────────
 
   /**
-   * Review activity — 1-2 paginated API calls total, no per-MR notes fetching.
+   * Review activity with capped notes fetch.
    *
-   * Per-MR notes were the main source of unbounded API calls here (up to 20 extra
-   * requests for a busy reviewer). We now only fetch the reviewer MR list and parse
-   * project names from the web_url — no extra calls needed.
+   * Fetches reviewer MR list (1-3 pages) and then fetches notes for the top
+   * REVIEW_NOTE_CAP reviewed MRs to count approvals and comments — real numbers
+   * instead of zeros, within a predictable subrequest budget.
+   *
+   * Budget: 1-3 (reviewer list) + up to REVIEW_NOTE_CAP (notes) = ~8 calls max.
    */
   async getReviewActivity(
     groupId: string,
@@ -302,14 +340,14 @@ export class GitLabClient {
       reviewer_username: gitlabUsername,
       state: "merged",
       created_after: fetchSince.toISOString(),
-    }, 3);  // max 3 pages
+    }, 3);
 
     const inRange = allMRs.filter((mr) => {
       const mergedAt = new Date(mr.merged_at);
       return mergedAt >= since && mergedAt <= until;
     });
 
-    // Parse project name from web_url — free, no API call
+    // Parse project name from web_url — no API call needed
     const reviewedMRs: ReviewActivity["reviewedMRs"] = inRange.slice(0, 15).map((mr) => {
       let projectName = `Project ${mr.project_id}`;
       try {
@@ -319,32 +357,50 @@ export class GitLabClient {
       return { title: mr.title, web_url: mr.web_url, projectName };
     });
 
+    // Fetch notes for the top N reviewed MRs to count approvals + comments
+    let approvals = 0;
+    let commentsLeft = 0;
+    let discussionsResolved = 0;
+
+    for (const mr of inRange.slice(0, REVIEW_NOTE_CAP)) {
+      try {
+        const notes = await this.fetch<GitLabNote[]>(
+          `/projects/${mr.project_id}/merge_requests/${mr.iid}/notes`,
+          { per_page: "100" }
+        );
+        for (const note of notes) {
+          if (note.author.username !== gitlabUsername) continue;
+          if (note.system) {
+            if (/approved this merge request/i.test(note.body)) approvals++;
+            if (/resolved all threads/i.test(note.body)) discussionsResolved++;
+          } else {
+            commentsLeft++;
+          }
+        }
+      } catch { /* skip on error */ }
+    }
+
     return {
-      username: gitlabUsername,
-      displayName: gitlabUsername,
-      reviewsGiven: inRange.length,
-      approvals: 0,          // would need per-MR notes — too expensive
-      commentsLeft: 0,
-      discussionsResolved: 0,
+      username:            gitlabUsername,
+      displayName:         gitlabUsername,
+      reviewsGiven:        inRange.length,
+      approvals,
+      commentsLeft,
+      discussionsResolved,
       reviewedMRs,
     };
   }
 
-  // ─── Enriched MRs ──────────────────────────────────────────────────────────
+  // ─── Enriched MRs ─────────────────────────────────────────────────────────
 
   /**
-   * Fetch actual diff stats (additions/deletions) for each MR and merge them in.
-   *
-   * Call this after enrichMRs when you have subrequest budget (single-user or
-   * single-project scope). Capped at `maxMRs` to guarantee we never blow the 50-request
-   * limit — MRs beyond the cap keep their files-changed proxy from enrichMRs.
-   *
-   * Cost: 1 API call per MR (up to maxMRs).
+   * Fetch actual diff stats for each MR and merge them in.
+   * Capped at `maxMRs` to stay within the 50-subrequest free-plan limit.
    */
   async enrichDiffStats(mrs: EnrichedMR[], maxMRs = 35): Promise<EnrichedMR[]> {
     if (mrs.length === 0) return mrs;
     const toEnrich = mrs.slice(0, maxMRs);
-    const rest = mrs.slice(maxMRs);
+    const rest     = mrs.slice(maxMRs);
 
     const enriched = await Promise.all(
       toEnrich.map(async (mr): Promise<EnrichedMR> => {
@@ -352,7 +408,6 @@ export class GitLabClient {
         return stats ? { ...mr, diffStats: stats } : mr;
       })
     );
-
     return [...enriched, ...rest];
   }
 
@@ -360,35 +415,30 @@ export class GitLabClient {
    * Lite enrichment: O(unique_projects) API calls — never O(N) per MR.
    *
    * - Project name/URL resolved once per unique project_id (parallel, cached).
-   * - Commits skipped (titles + descriptions are enough for AI summarisation).
-   * - Diff stats derived from `changes_count` already present in the list response
-   *   (files changed, not lines — avoids one extra API call per MR).
+   * - Commits skipped — MR titles are sufficient for AI summarisation.
+   * - Diff stats derived from `changes_count` already present in the list response.
    *
-   * This is the only `enrichMRs` — the old per-MR commits/diffs version was the
-   * primary cause of "Too many subrequests" on the free plan.
+   * This prevents "Too many subrequests" on the Cloudflare Workers free plan.
    */
   async enrichMRs(mrs: GitLabMR[]): Promise<EnrichedMR[]> {
     if (mrs.length === 0) return [];
 
-    // Resolve unique projects in parallel — typically 1-5 calls total, not N
-    const uniqueIds = [...new Set(mrs.map((m) => m.project_id))];
+    const uniqueIds  = [...new Set(mrs.map((m) => m.project_id))];
     const projectMap = new Map<number, GitLabProject | null>();
-    await Promise.all(
-      uniqueIds.map(async (id) => {
-        projectMap.set(id, await this.getProject(id));
-      })
-    );
+    await Promise.all(uniqueIds.map(async (id) => {
+      projectMap.set(id, await this.getProject(id));
+    }));
 
     return mrs.map((mr): EnrichedMR => {
-      const project = projectMap.get(mr.project_id);
+      const project      = projectMap.get(mr.project_id);
       const filesChanged = parseInt(mr.changes_count ?? "0", 10) || 0;
-      const isRevert = /^Revert\s+"/i.test(mr.title) || mr.source_branch.startsWith("revert-");
+      const isRevert     = /^Revert\s+"/i.test(mr.title) || mr.source_branch.startsWith("revert-");
       return {
         ...mr,
-        projectName: project?.name ?? `Project ${mr.project_id}`,
+        projectName: project?.name   ?? `Project ${mr.project_id}`,
         projectUrl:  project?.web_url ?? "",
-        commits:  [],          // not fetched — saves N API calls
-        diffStats: filesChanged > 0 ? { additions: filesChanged, deletions: 0 } : null,
+        commits:     [],
+        diffStats:   filesChanged > 0 ? { additions: filesChanged, deletions: 0 } : null,
         isRevert,
       };
     });

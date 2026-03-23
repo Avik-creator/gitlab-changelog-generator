@@ -7,6 +7,8 @@ import { handleConfig } from "./config";
 import { handleStats } from "./stats";
 import { handleRelease } from "./release";
 import { handleLeaderboard } from "./leaderboard";
+import { handleAdmin } from "./admin";
+import { handleTeam } from "./team";
 import { buildChangelogEmbed } from "../embeds";
 import { handleAutocomplete } from "../autocomplete";
 
@@ -91,6 +93,16 @@ async function dispatchChangelog(
       const inner = opts[0];
       if (!inner) return;
       return handleConfig(appId, token, inner.name, inner.options ?? [], env, userId);
+    }
+    case "admin": {
+      const inner = opts[0];
+      if (!inner) return;
+      return handleAdmin(inner.name, inner.options ?? [], appId, token, env, userId);
+    }
+    case "team": {
+      const inner = opts[0];
+      if (!inner) return;
+      return handleTeam(inner.name, inner.options ?? [], appId, token, env);
     }
     default:
       await fetch(`https://discord.com/api/v10/webhooks/${appId}/${token}/messages/@original`, {

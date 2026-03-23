@@ -9,6 +9,7 @@
 import type { Env, DiscordInteraction, DiscordCommandOption, GitLabProject } from "../types";
 import { GitLabClient } from "../gitlab/client";
 import { getAllMappings } from "../kv/users";
+import { listTeams } from "../kv/teams";
 
 interface AutocompleteChoice {
   name: string;
@@ -184,6 +185,16 @@ function suggestRanges(query: string): AutocompleteChoice[] {
   return filterChoices(choices, query);
 }
 
+/** Named sub-teams — for the `team` field in /changelog generate */
+async function suggestTeams(env: Env, query: string): Promise<AutocompleteChoice[]> {
+  const teams = await listTeams(env.USERS_KV).catch(() => []);
+  const choices: AutocompleteChoice[] = teams.map((t) => ({
+    name: `${t.name} (${t.members.length} members)`,
+    value: t.name,
+  }));
+  return filterChoices(choices, query);
+}
+
 // ─── ISO week helpers (self-contained to avoid circular imports) ──────────────
 
 function isoWeekNum(d: Date): number {
@@ -256,6 +267,9 @@ export async function handleAutocomplete(
         break;
       case "range":
         choices = suggestRanges(query);
+        break;
+      case "team":
+        choices = await suggestTeams(env, query);
         break;
     }
   } catch (err) {

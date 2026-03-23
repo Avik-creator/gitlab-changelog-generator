@@ -1,14 +1,15 @@
 /**
  * ISO 8601 week utilities + flexible date range parsing.
- * Weeks run Monday 00:00 UTC → Sunday 23:59:59 UTC.
+ * Weeks run Monday 00:00 → Sunday 23:59:59 in the *user's timezone* (defaults to UTC).
  */
 
 import type { DateRange } from "../types";
+import { localNow } from "./timezone";
 
 export interface WeekRange {
-  weekISO: string;
+  weekISO:   string;
   weekStart: Date;
-  weekEnd: Date;
+  weekEnd:   Date;
 }
 
 function isoWeekNumber(d: Date): number {
@@ -25,7 +26,7 @@ function isoWeekYear(d: Date): number {
 }
 
 function mondayOf(d: Date): Date {
-  const day = d.getUTCDay() || 7;
+  const day    = d.getUTCDay() || 7;
   const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   monday.setUTCDate(monday.getUTCDate() - (day - 1));
   return monday;
@@ -44,15 +45,18 @@ function rangeFromDate(d: Date): WeekRange {
 }
 
 function formatLabel(since: Date, until: Date): string {
-  const opts: Intl.DateTimeFormatOptions = { month: "short", day: "numeric", timeZone: "UTC" };
+  const opts:     Intl.DateTimeFormatOptions = { month: "short", day: "numeric", timeZone: "UTC" };
   const yearOpts: Intl.DateTimeFormatOptions = { ...opts, year: "numeric" };
   return `${since.toLocaleDateString("en-US", opts)} – ${until.toLocaleDateString("en-US", yearOpts)}`;
 }
 
 // ─── Week parser (for --week flag) ────────────────────────────────────────────
 
-export function parseWeek(input: string = "last"): WeekRange {
-  const now = new Date();
+export function parseWeek(input: string = "last", timezone?: string): WeekRange {
+  // Use wall-clock "now" in the user's timezone so that "last" and "this" respect
+  // their local Monday, not UTC Monday.
+  const now = timezone ? localNow(timezone) : new Date();
+
   if (input === "this") return rangeFromDate(now);
   if (input === "last") {
     const last = new Date(now); last.setUTCDate(now.getUTCDate() - 7);
@@ -78,7 +82,7 @@ export function parseWeek(input: string = "last"): WeekRange {
   return rangeFromDate(last);
 }
 
-// ─── Flexible date range parser ───────────────────────────────────────────────
+// ─── Flexible date range parser ────────────────────────────────────────────────
 
 /**
  * Parse flexible date inputs into a DateRange.
@@ -88,14 +92,19 @@ export function parseWeek(input: string = "last"): WeekRange {
  *   rolling:     "7d", "14d", "30d"
  *   month:       "this-month", "last-month", "2026-03"
  *   explicit:    from+to as ISO date strings "2026-03-01"
+ *
+ * Pass `timezone` (IANA name, e.g. "Asia/Kolkata") to shift "last week" / "this week"
+ * boundaries to the user's local Monday instead of UTC Monday.
  */
 export function parseDateRange(opts: {
-  week?: string;
-  range?: string;
-  from?: string;
-  to?: string;
+  week?:     string;
+  range?:    string;
+  from?:     string;
+  to?:       string;
+  timezone?: string;
 }): DateRange {
-  const now = new Date();
+  const tz  = opts.timezone;
+  const now = tz ? localNow(tz) : new Date();
 
   // Explicit from/to
   if (opts.from) {
@@ -108,30 +117,35 @@ export function parseDateRange(opts: {
   if (opts.range) {
     const dMatch = /^(\d+)d$/.exec(opts.range);
     if (dMatch) {
-      const days = parseInt(dMatch[1]!);
+      const days  = parseInt(dMatch[1]!);
       const since = new Date(now);
       since.setUTCDate(now.getUTCDate() - days);
       since.setUTCHours(0, 0, 0, 0);
       return { since, until: now, label: `Last ${days} days` };
     }
 
-    // "this-month"
     if (opts.range === "this-month") {
       const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-      return { since, until: now, label: `This month (${since.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })})` };
+      return {
+        since,
+        until: now,
+        label: `This month (${since.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })})`,
+      };
     }
 
-    // "last-month"
     if (opts.range === "last-month") {
       const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
       const until = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0, 23, 59, 59, 999));
-      return { since, until, label: `Last month (${since.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })})` };
+      return {
+        since,
+        until,
+        label: `Last month (${since.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })})`,
+      };
     }
 
-    // "2026-03" (specific month)
     const monthMatch = /^(\d{4})-(\d{2})$/.exec(opts.range);
     if (monthMatch) {
-      const year = parseInt(monthMatch[1]!);
+      const year  = parseInt(monthMatch[1]!);
       const month = parseInt(monthMatch[2]!) - 1;
       const since = new Date(Date.UTC(year, month, 1));
       const until = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999));
@@ -139,13 +153,13 @@ export function parseDateRange(opts: {
     }
   }
 
-  // Week-based (default)
+  // Week-based (default) — timezone-aware
   const weekInput = opts.week ?? opts.range ?? "last";
-  const wr = parseWeek(weekInput);
+  const wr        = parseWeek(weekInput, tz);
   return {
-    since: wr.weekStart,
-    until: wr.weekEnd,
-    label: formatLabel(wr.weekStart, wr.weekEnd),
+    since:   wr.weekStart,
+    until:   wr.weekEnd,
+    label:   formatLabel(wr.weekStart, wr.weekEnd),
     isoWeek: wr.weekISO,
   };
 }

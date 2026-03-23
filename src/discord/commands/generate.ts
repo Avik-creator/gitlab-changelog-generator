@@ -16,6 +16,7 @@ import { parseDateRange } from "../../utils/weeks";
 import { cacheStats, getCachedStats } from "../../kv/stats-cache";
 import { computeTrend, previousPeriodLabel } from "../../gitlab/trends";
 import { postThreadedDigest } from "../thread";
+import { getTeam } from "../../kv/teams";
 
 function getOpt(opts: DiscordCommandOption[], name: string): string | undefined {
   return opts.find((o) => o.name === name)?.value as string | undefined;
@@ -48,41 +49,77 @@ export async function handleGenerate(
   appId: string, token: string, options: DiscordCommandOption[],
   env: Env, requesterId: string
 ): Promise<void> {
-  const userOpt     = getOpt(options, "user");
-  const gitlabOpt   = getOpt(options, "gitlab");
-  const projectOpt  = getOpt(options, "project");
-  const labelOpt    = getOpt(options, "label");
-  const milestoneOpt= getOpt(options, "milestone");
-  const weekOpt     = getOpt(options, "week");
-  const rangeOpt    = getOpt(options, "range");
-  const fromOpt     = getOpt(options, "from");
-  const toOpt       = getOpt(options, "to");
-  const modeOpt     = coerceMode(getOpt(options, "mode"));
-  const preview     = getBool(options, "preview");
-  const allFlag     = getBool(options, "all");
-  const threadMode  = getBool(options, "thread");
+  const userOpt      = getOpt(options, "user");
+  const gitlabOpt    = getOpt(options, "gitlab");
+  const projectOpt   = getOpt(options, "project");
+  const labelOpt     = getOpt(options, "label");
+  const milestoneOpt = getOpt(options, "milestone");
+  const teamOpt      = getOpt(options, "team");
+  const weekOpt      = getOpt(options, "week");
+  const rangeOpt     = getOpt(options, "range");
+  const fromOpt      = getOpt(options, "from");
+  const toOpt        = getOpt(options, "to");
+  const modeOpt      = coerceMode(getOpt(options, "mode"));
+  const preview      = getBool(options, "preview");
+  const allFlag      = getBool(options, "all");
+  const threadMode   = getBool(options, "thread");
 
   const globalConfig = await getGlobalConfig(env.USERS_KV);
-  const userConfig = await getUserConfig(env.USERS_KV, requesterId);
-  const filters = resolveFilters(globalConfig, userConfig);
-  const mode = modeOpt ?? resolveStyle(globalConfig, userConfig);
-  const dateRange = parseDateRange({ week: weekOpt, range: rangeOpt, from: fromOpt, to: toOpt });
+  const userConfig   = await getUserConfig(env.USERS_KV, requesterId);
+  const filters      = resolveFilters(globalConfig, userConfig);
+  const mode         = modeOpt ?? resolveStyle(globalConfig, userConfig);
+  const verbosity    = userConfig.verbosity as "brief" | "normal" | "detailed" | undefined;
+
+  // Use the requester's timezone to shift "last week" / "this week" boundaries
+  const timezone  = userConfig.timezone ?? "UTC";
+  const dateRange = parseDateRange({ week: weekOpt, range: rangeOpt, from: fromOpt, to: toOpt, timezone });
 
   try {
-    // ── All group members ────────────────────────────────────────────────────
+    // ── Named team scope ─────────────────────────────────────────────────────
+    if (teamOpt) {
+      const team = await getTeam(env.USERS_KV, teamOpt);
+      if (!team) {
+        await patch(appId, token, buildErrorEmbed("Team not found", `Team \`${teamOpt}\` doesn't exist. Use \`/changelog team create\` to add it.`));
+        return;
+      }
+
+      const changelogs = await Promise.allSettled(
+        team.members.map((username) =>
+          buildChangelogForUser(username, username, env, dateRange, mode, filters)
+        )
+      );
+
+      const resolved = changelogs
+        .filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof buildChangelogForUser>>> => r.status === "fulfilled")
+        .map((r) => r.value);
+
+      for (const data of resolved) {
+        if (data.mergedMRs.length === 0 && data.staleMRs.length === 0) continue;
+        data.aiSummary = await generateAISummary(env.AI, data, mode, verbosity);
+      }
+
+      const channelId = team.channelId ?? env.DISCORD_CHANGELOG_CHANNEL_ID;
+      let posted = 0;
+      for (const data of resolved) {
+        if (data.mergedMRs.length === 0 && data.staleMRs.length === 0) continue;
+        await postToChannel(channelId, buildChangelogEmbed(data), env.DISCORD_BOT_TOKEN);
+        posted++;
+      }
+      await patch(appId, token, { content: `✅ Posted changelogs for **${posted}** member(s) in team \`${team.name}\` — ${dateRange.label}.` });
+      return;
+    }
+
+    // ── All group members ─────────────────────────────────────────────────────
     if (allFlag) {
       const changelogs = await buildChangelogsForGroup(env.GITLAB_GROUP_ID, env, dateRange, mode, filters);
-      const period    = dateRange.isoWeek ?? dateRange.label;
-      const prevLabel = previousPeriodLabel(dateRange.isoWeek ?? "");
+      const period     = dateRange.isoWeek ?? dateRange.label;
+      const prevLabel  = previousPeriodLabel(dateRange.isoWeek ?? "");
 
-      // Attach trends + AI summaries, cache stats
       for (const data of changelogs) {
         if (data.mergedMRs.length === 0 && data.staleMRs.length === 0) continue;
-        data.aiSummary = await generateAISummary(env.AI, data, mode);
+        data.aiSummary = await generateAISummary(env.AI, data, mode, verbosity);
 
-        // Cache stats for future trend lookups
-        const stats = await computeUserStats(data.gitlabUsername, data.displayName, env, dateRange, filters)
-          .catch(() => null);
+        const stats = await computeUserStats(data.gitlabUsername, data.displayName, env, dateRange, filters).catch(() => null);
         if (stats) {
           await cacheStats(env.USERS_KV, period, stats);
           const prevStats = await getCachedStats(env.USERS_KV, prevLabel, data.gitlabUsername).catch(() => null);
@@ -99,7 +136,7 @@ export async function handleGenerate(
           periodLabel: dateRange.label,
         });
         await patch(appId, token, {
-          content: `✅ Thread posted: **${result.posted}** members in thread, **${result.skipped}** skipped — ${dateRange.label}.`,
+          content: `✅ Thread posted: **${result.posted}** members, **${result.skipped}** skipped — ${dateRange.label}.`,
         });
       } else {
         let posted = 0;
@@ -113,50 +150,50 @@ export async function handleGenerate(
       return;
     }
 
-    // ── Project scope ────────────────────────────────────────────────────────
+    // ── Project scope ─────────────────────────────────────────────────────────
     if (projectOpt) {
       const data = await buildChangelogForProject(projectOpt, env, dateRange, mode, filters);
-      data.aiSummary = await generateAISummary(env.AI, data, mode);
+      data.aiSummary = await generateAISummary(env.AI, data, mode, verbosity);
       return await finishAndPost(appId, token, env, data, preview);
     }
 
-    // ── Label scope ──────────────────────────────────────────────────────────
+    // ── Label scope ───────────────────────────────────────────────────────────
     if (labelOpt) {
       const data = await buildChangelogForLabel(labelOpt, env, dateRange, mode, filters);
-      data.aiSummary = await generateAISummary(env.AI, data, mode);
+      data.aiSummary = await generateAISummary(env.AI, data, mode, verbosity);
       return await finishAndPost(appId, token, env, data, preview);
     }
 
-    // ── Milestone scope ──────────────────────────────────────────────────────
+    // ── Milestone scope ───────────────────────────────────────────────────────
     if (milestoneOpt) {
       const data = await buildChangelogForMilestone(milestoneOpt, env, mode, filters);
-      data.aiSummary = await generateAISummary(env.AI, data, mode);
+      data.aiSummary = await generateAISummary(env.AI, data, mode, verbosity);
       return await finishAndPost(appId, token, env, data, preview);
     }
 
-    // ── Single user ──────────────────────────────────────────────────────────
+    // ── Single user ───────────────────────────────────────────────────────────
     let gitlabUsername: string;
     let displayName: string;
 
     if (gitlabOpt) {
       gitlabUsername = gitlabOpt.replace(/^gitlab:/i, "").trim();
-      displayName = gitlabUsername;
+      displayName    = gitlabUsername;
       try {
-        const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
+        const client  = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
         const members = await client.getGroupMembers(env.GITLAB_GROUP_ID);
-        const found = members.find((m) => m.username === gitlabUsername);
+        const found   = members.find((m) => m.username === gitlabUsername);
         if (found) displayName = found.name;
       } catch { /* best-effort */ }
 
     } else if (userOpt) {
       const cleanId = userOpt.replace(/[<@!>]/g, "").trim();
-      const mapped = await getGitlabUsername(env.USERS_KV, cleanId);
+      const mapped  = await getGitlabUsername(env.USERS_KV, cleanId);
       if (!mapped) {
         await patch(appId, token, buildErrorEmbed("User not linked", `<@${cleanId}> hasn't linked their GitLab. Use \`/changelog link\` or pass \`gitlab:username\`.`));
         return;
       }
       gitlabUsername = mapped;
-      displayName = gitlabUsername;
+      displayName    = gitlabUsername;
 
     } else {
       const mapped = await getGitlabUsername(env.USERS_KV, requesterId);
@@ -165,16 +202,26 @@ export async function handleGenerate(
         return;
       }
       gitlabUsername = mapped;
-      displayName = gitlabUsername;
+      displayName    = gitlabUsername;
     }
 
-    const data = await buildChangelogForUser(gitlabUsername, displayName, env, dateRange, mode, filters);
-    data.aiSummary = await generateAISummary(env.AI, data, mode);
+    // Use the target user's timezone if we looked them up
+    const targetTimezone = gitlabOpt || userOpt
+      ? "UTC"
+      : timezone; // only apply requester timezone when generating for self
+
+    const userDateRange = parseDateRange({
+      week: weekOpt, range: rangeOpt, from: fromOpt, to: toOpt,
+      timezone: targetTimezone,
+    });
+
+    const data = await buildChangelogForUser(gitlabUsername, displayName, env, userDateRange, mode, filters);
+    data.aiSummary = await generateAISummary(env.AI, data, mode, verbosity);
 
     // Cache stats + attach trend
-    const period    = dateRange.isoWeek ?? dateRange.label;
-    const prevLabel = previousPeriodLabel(dateRange.isoWeek ?? "");
-    const stats = await computeUserStats(gitlabUsername, displayName, env, dateRange, filters).catch(() => null);
+    const period    = userDateRange.isoWeek ?? userDateRange.label;
+    const prevLabel = previousPeriodLabel(userDateRange.isoWeek ?? "");
+    const stats = await computeUserStats(gitlabUsername, displayName, env, userDateRange, filters).catch(() => null);
     if (stats) {
       await cacheStats(env.USERS_KV, period, stats);
       const prevStats = await getCachedStats(env.USERS_KV, prevLabel, gitlabUsername).catch(() => null);
