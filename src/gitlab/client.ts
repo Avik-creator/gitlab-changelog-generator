@@ -244,20 +244,6 @@ export class GitLabClient {
     } catch { return []; }
   }
 
-  async getDiffStats(
-    projectId: number,
-    mrIid: number
-  ): Promise<{ additions: number; deletions: number } | null> {
-    try {
-      const mr = await this.fetch<{
-        diff_stats?: { additions: number; deletions: number };
-        changes_count?: string;
-      }>(`/projects/${projectId}/merge_requests/${mrIid}`);
-      if (mr.diff_stats) return mr.diff_stats;
-      return { additions: parseInt(mr.changes_count ?? "0"), deletions: 0 };
-    } catch { return null; }
-  }
-
   // ─── Projects ─────────────────────────────────────────────────────────────
 
   async getProject(projectId: number): Promise<GitLabProject | null> {
