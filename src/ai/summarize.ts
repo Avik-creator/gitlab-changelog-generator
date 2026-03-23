@@ -6,16 +6,19 @@ const MODEL = "@cf/zai-org/glm-4.7-flash";
 
 function buildMRContext(mrs: EnrichedMR[]): string {
   return mrs.map((mr) => {
-    const diff = mr.diffStats ? ` (+${mr.diffStats.additions}/-${mr.diffStats.deletions})` : "";
+    // Show real line counts if available (deletions > 0), else file count
+    const diff = mr.diffStats
+      ? mr.diffStats.deletions > 0
+        ? ` (+${mr.diffStats.additions} lines / -${mr.diffStats.deletions} lines)`
+        : ` (${mr.diffStats.additions} files changed)`
+      : "";
     const labels = mr.labels.length ? ` [${mr.labels.join(", ")}]` : "";
     const milestone = mr.milestone ? ` | milestone: ${mr.milestone.title}` : "";
-    const commits = mr.commits.slice(0, 5).map((c) => `    - ${c.title}`).join("\n");
     return (
       `MR: ${mr.title}${diff}${labels}${milestone}\n` +
       `  Project: ${mr.projectName} | Author: ${mr.author.name}\n` +
       `  Branch: ${mr.source_branch} → ${mr.target_branch}\n` +
-      (commits ? `  Commits:\n${commits}\n` : "") +
-      (mr.description ? `  Description: ${mr.description.slice(0, 200)}\n` : "")
+      (mr.description ? `  Description: ${mr.description.slice(0, 300)}\n` : "")
     );
   }).join("\n");
 }

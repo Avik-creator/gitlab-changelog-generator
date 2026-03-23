@@ -18,10 +18,15 @@ function truncate(text: string, max: number): string {
 }
 
 function mrLine(mr: EnrichedMR): string {
-  const files = mr.diffStats?.additions ? ` \`${mr.diffStats.additions}f\`` : "";
+  // If deletions > 0, we have real line counts; otherwise it's the files-changed proxy
+  const diff = mr.diffStats
+    ? mr.diffStats.deletions > 0
+      ? ` \`+${mr.diffStats.additions}/-${mr.diffStats.deletions}\``
+      : ` \`${mr.diffStats.additions}f\``
+    : "";
   const labels = mr.labels.length ? ` · ${mr.labels.slice(0, 2).join(", ")}` : "";
   const milestone = mr.milestone ? ` 🏁 ${mr.milestone.title}` : "";
-  return `• [${truncate(mr.title, 52)}](${mr.web_url})${files}${labels}${milestone}`;
+  return `• [${truncate(mr.title, 50)}](${mr.web_url})${diff}${labels}${milestone}`;
 }
 
 /** Split a list of MRs into multiple embed fields to stay within Discord's 1024-char limit. */
@@ -83,9 +88,19 @@ export function buildChangelogEmbed(data: ChangelogData): object {
       }
     }
 
-    // Stats bar
+    // Stats bar — detect whether we have real line counts or just file counts
+    const hasRealLines = mergedMRs.some((mr) => mr.diffStats && mr.diffStats.deletions > 0);
+    let totalAdds = 0, totalDels = 0;
+    for (const mr of mergedMRs) {
+      if (mr.diffStats) { totalAdds += mr.diffStats.additions; totalDels += mr.diffStats.deletions; }
+    }
+
     const stats = [`**${mergedMRs.length}** MRs merged`];
-    if (totalFiles > 0) stats.push(`**${totalFiles}** files changed`);
+    if (hasRealLines) {
+      stats.push(`\`+${totalAdds}/-${totalDels}\` lines`);
+    } else if (totalFiles > 0) {
+      stats.push(`**${totalFiles}** files changed`);
+    }
     if (grouped.size > 1) stats.push(`**${grouped.size}** projects`);
     if (filteredOutCount > 0) stats.push(`${filteredOutCount} filtered out`);
 

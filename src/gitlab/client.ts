@@ -333,6 +333,30 @@ export class GitLabClient {
   // ─── Enriched MRs ──────────────────────────────────────────────────────────
 
   /**
+   * Fetch actual diff stats (additions/deletions) for each MR and merge them in.
+   *
+   * Call this after enrichMRs when you have subrequest budget (single-user or
+   * single-project scope). Capped at `maxMRs` to guarantee we never blow the 50-request
+   * limit — MRs beyond the cap keep their files-changed proxy from enrichMRs.
+   *
+   * Cost: 1 API call per MR (up to maxMRs).
+   */
+  async enrichDiffStats(mrs: EnrichedMR[], maxMRs = 35): Promise<EnrichedMR[]> {
+    if (mrs.length === 0) return mrs;
+    const toEnrich = mrs.slice(0, maxMRs);
+    const rest = mrs.slice(maxMRs);
+
+    const enriched = await Promise.all(
+      toEnrich.map(async (mr): Promise<EnrichedMR> => {
+        const stats = await this.getDiffStats(mr.project_id, mr.iid);
+        return stats ? { ...mr, diffStats: stats } : mr;
+      })
+    );
+
+    return [...enriched, ...rest];
+  }
+
+  /**
    * Lite enrichment: O(unique_projects) API calls — never O(N) per MR.
    *
    * - Project name/URL resolved once per unique project_id (parallel, cached).

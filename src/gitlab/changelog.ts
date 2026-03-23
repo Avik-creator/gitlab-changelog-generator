@@ -38,13 +38,16 @@ export async function buildChangelogForUser(
       isRevert: false,
     }));
 
-  const [rawMRs, staleMRs, reviewActivity] = await Promise.all([
+  const [rawEnriched, staleMRs, reviewActivity] = await Promise.all([
     client.getMergedMRsByAuthor(env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until)
       .then((mrs) => client.enrichMRs(mrs)),
     client.getStaleMRs(env.GITLAB_GROUP_ID, [gitlabUsername]),
     client.getReviewActivity(env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until)
       .catch(() => null),
   ]);
+
+  // Fetch actual line counts — budget: ~10 base calls + N diff calls, stays under 50
+  const rawMRs = await client.enrichDiffStats(rawEnriched, 35);
 
   const { passed: mergedMRs, filteredOut } = applyFilters(rawMRs, filters);
   const inputQuality = assessInputQuality(mergedMRs);
@@ -104,7 +107,9 @@ export async function buildChangelogForProject(
 
   const rawMRs = await client.getMergedMRsForProject(project.id, dateRange.since, dateRange.until);
   const enriched = await client.enrichMRs(rawMRs);
-  const { passed: mergedMRs, filteredOut } = applyFilters(enriched, filters);
+  // Fetch actual line counts — project scope has low base call count so budget is plentiful
+  const withDiffs = await client.enrichDiffStats(enriched, 40);
+  const { passed: mergedMRs, filteredOut } = applyFilters(withDiffs, filters);
   const inputQuality = assessInputQuality(mergedMRs);
 
   return {
