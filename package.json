@@ -1,0 +1,24 @@
+{
+  "name": "gitlab-changelog-generator",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "register-commands": "bun run scripts/register-commands.ts",
+    "kv:create": "wrangler kv namespace create USERS_KV",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "@types/bun": "latest",
+    "wrangler": "^4.76.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "hono": "^4.12.8"
+  }
+}

@@ -1,0 +1,21 @@
+name = "gitlab-changelog-generator"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["0 9 * * MON"]
+
+[ai]
+binding = "AI"
+
+[[kv_namespaces]]
+binding = "USERS_KV"
+id = "7e97fcea82fd4ca99b7bbbdd0db9d355"
+preview_id = "7e97fcea82fd4ca99b7bbbdd0db9d355"
+
+[vars]
+DISCORD_APPLICATION_ID = "1480908278841217204"
+GITLAB_BASE_URL = "https://gitlab.com"
+GITLAB_GROUP_ID = "123314373"
+DISCORD_CHANGELOG_CHANNEL_ID = "1442398177872580731"
