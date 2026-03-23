@@ -391,26 +391,6 @@ export class GitLabClient {
     };
   }
 
-  // ─── Enriched MRs ─────────────────────────────────────────────────────────
-
-  /**
-   * Fetch actual diff stats for each MR and merge them in.
-   * Capped at `maxMRs` to stay within the 50-subrequest free-plan limit.
-   */
-  async enrichDiffStats(mrs: EnrichedMR[], maxMRs = 35): Promise<EnrichedMR[]> {
-    if (mrs.length === 0) return mrs;
-    const toEnrich = mrs.slice(0, maxMRs);
-    const rest     = mrs.slice(maxMRs);
-
-    const enriched = await Promise.all(
-      toEnrich.map(async (mr): Promise<EnrichedMR> => {
-        const stats = await this.getDiffStats(mr.project_id, mr.iid);
-        return stats ? { ...mr, diffStats: stats } : mr;
-      })
-    );
-    return [...enriched, ...rest];
-  }
-
   /**
    * Lite enrichment: O(unique_projects) API calls — never O(N) per MR.
    *
