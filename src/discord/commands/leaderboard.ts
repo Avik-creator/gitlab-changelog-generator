@@ -8,7 +8,7 @@
  */
 
 import type { Env, DiscordCommandOption, UserStats } from "../../types";
-import { computeUserStats } from "../../gitlab/changelog";
+import { computeUserStatsLite } from "../../gitlab/changelog";
 import { GitLabClient } from "../../gitlab/client";
 import { getGlobalConfig, getUserConfig, resolveFilters } from "../../kv/config";
 import { parseDateRange } from "../../utils/weeks";
@@ -66,21 +66,23 @@ export async function handleLeaderboard(
       return;
     }
 
-    // Compute stats for all members in parallel (capped to 5 concurrent to be kind to GitLab API)
+    // Process members sequentially — avoids blowing the 50-subrequest limit.
+    // Each member costs ~2 API calls (MR list + review activity) via the lite path.
+    // KV cache is checked first so subsequent calls are free.
     const period = dateRange.isoWeek ?? dateRange.label;
     const prevPeriod = previousPeriodLabel(dateRange.isoWeek ?? "");
 
-    const statsResults = await Promise.allSettled(
-      members.map((m) =>
-        getOrComputeStats(env.USERS_KV, period, m.username, () =>
-          computeUserStats(m.username, m.name, env, dateRange, filters)
-        )
-      )
-    );
-
-    const statsList: UserStats[] = statsResults
-      .filter((r): r is PromiseFulfilledResult<UserStats> => r.status === "fulfilled")
-      .map((r) => r.value);
+    const statsList: UserStats[] = [];
+    for (const m of members) {
+      try {
+        const stats = await getOrComputeStats(env.USERS_KV, period, m.username, () =>
+          computeUserStatsLite(m.username, m.name, env, dateRange, filters)
+        );
+        statsList.push(stats);
+      } catch (err) {
+        console.error(`Stats failed for ${m.username}:`, err);
+      }
+    }
 
     // Sort by chosen metric
     const sorted = [...statsList].sort((a, b) => {

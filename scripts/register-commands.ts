@@ -173,7 +173,7 @@ const commands = [
             required: false,
             choices: [
               { name: "🏆 MRs Merged",            value: "mrs" },
-              { name: "📝 Lines Changed",          value: "lines" },
+              { name: "📝 Files Changed",           value: "lines" },
               { name: "🔍 Reviews Given",          value: "reviews" },
               { name: "⚡ Fastest to Merge (avg)", value: "speed" },
             ],

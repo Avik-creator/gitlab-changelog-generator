@@ -183,6 +183,74 @@ export async function buildChangelogForMilestone(
 }
 
 /**
+ * Lightweight stats — only 2 API calls per user (MR list + review activity).
+ * No per-MR enrichment (commits/diffs), so it stays well within the 50-subrequest
+ * limit on the Cloudflare Workers free plan.
+ *
+ * Used by the leaderboard command where many users are fetched simultaneously.
+ * Diff line counts are approximated from `changes_count` (files changed),
+ * and project names are parsed from the MR web_url.
+ */
+export async function computeUserStatsLite(
+  gitlabUsername: string,
+  displayName: string,
+  env: Env,
+  dateRange: DateRange,
+  filters: FilterConfig
+): Promise<UserStats> {
+  const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
+
+  const [rawMRs, reviewActivity] = await Promise.all([
+    client.getMergedMRsByAuthor(env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until),
+    client.getReviewActivity(env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until)
+      .catch((): null => null),
+  ]);
+
+  // Apply filters against the raw MRs (no enrichment needed for most filters)
+  const filteredMRs = rawMRs.filter((mr) => {
+    if (!filters.includeDrafts && mr.draft) return false;
+    if (filters.excludeLabels.some((l) => mr.labels.includes(l))) return false;
+    if (filters.includeLabels.length > 0 && !filters.includeLabels.some((l) => mr.labels.includes(l))) return false;
+    return true;
+  });
+
+  const reposSet = new Set<string>();
+  const labelsMap: Record<string, number> = {};
+  let totalMergeHours = 0;
+  let totalFilesChanged = 0;
+
+  for (const mr of filteredMRs) {
+    // Parse project path from web_url: https://gitlab.com/group/project/-/merge_requests/1
+    try {
+      const urlPath = new URL(mr.web_url).pathname;
+      const projectPath = (urlPath.split("/-/")[0] ?? "").replace(/^\//, "");
+      if (projectPath) reposSet.add(projectPath);
+    } catch { /* best-effort */ }
+
+    for (const l of mr.labels) labelsMap[l] = (labelsMap[l] ?? 0) + 1;
+    const created = new Date(mr.created_at).getTime();
+    const merged  = new Date(mr.merged_at).getTime();
+    totalMergeHours += (merged - created) / 3600000;
+    totalFilesChanged += parseInt(mr.changes_count ?? "0", 10) || 0;
+  }
+
+  return {
+    username: gitlabUsername,
+    displayName,
+    mrsMerged: filteredMRs.length,
+    totalAdditions: totalFilesChanged,   // proxy: files changed (not lines)
+    totalDeletions: 0,
+    reposContributed: [...reposSet],
+    avgTimeToMerge: filteredMRs.length ? Math.round(totalMergeHours / filteredMRs.length) : 0,
+    reviewActivity: reviewActivity ?? {
+      username: gitlabUsername, displayName, reviewsGiven: 0,
+      approvals: 0, commentsLeft: 0, discussionsResolved: 0, reviewedMRs: [],
+    },
+    labelsUsed: labelsMap,
+  };
+}
+
+/**
  * Compute stats for a user over a date range.
  */
 export async function computeUserStats(

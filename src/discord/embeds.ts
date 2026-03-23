@@ -318,7 +318,7 @@ export function buildLeaderboardEmbed(
 ): object {
   const metricLabels: Record<LeaderboardMetric, string> = {
     mrs:     "Most MRs Merged",
-    lines:   "Most Lines Changed",
+    lines:   "Most Files Changed",   // lite stats use files, not lines
     reviews: "Most Reviews Given",
     speed:   "Fastest to Merge (avg)",
   };
@@ -329,7 +329,7 @@ export function buildLeaderboardEmbed(
     let metricVal = "";
     switch (metric) {
       case "mrs":     metricVal = `${stats.mrsMerged} MRs`; break;
-      case "lines":   metricVal = `+${stats.totalAdditions}/-${stats.totalDeletions}`; break;
+      case "lines":   metricVal = `${stats.totalAdditions} files`; break;
       case "reviews": metricVal = `${stats.reviewActivity.reviewsGiven} reviews`; break;
       case "speed":   metricVal = stats.mrsMerged > 0 ? `${stats.avgTimeToMerge}h avg` : "no MRs"; break;
     }
