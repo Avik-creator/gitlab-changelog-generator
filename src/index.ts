@@ -10,7 +10,7 @@ import { getGlobalConfig, resolveFilters } from "./kv/config";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.post("/discord/interactions", async (c) => {
+app.post("/interactions", async (c) => {
   const rawBody = await c.req.text();
   const valid = await verifyDiscordSignature(c.req.raw, rawBody, c.env.DISCORD_PUBLIC_KEY);
   if (!valid) return c.json({ error: "Unauthorized" }, 401);
