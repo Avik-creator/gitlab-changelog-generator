@@ -5,6 +5,7 @@ import {
   buildChangelogForProject,
   buildChangelogForLabel,
   buildChangelogForMilestone,
+  computeUserStats,
 } from "../../gitlab/changelog";
 import { generateAISummary } from "../../ai/summarize";
 import { buildChangelogEmbed, buildErrorEmbed, buildPreviewComponents } from "../embeds";
@@ -12,6 +13,9 @@ import { getGitlabUsername } from "../../kv/users";
 import { getGlobalConfig, getUserConfig, resolveFilters, resolveStyle } from "../../kv/config";
 import { GitLabClient } from "../../gitlab/client";
 import { parseDateRange } from "../../utils/weeks";
+import { cacheStats, getCachedStats } from "../../kv/stats-cache";
+import { computeTrend, previousPeriodLabel } from "../../gitlab/trends";
+import { postThreadedDigest } from "../thread";
 
 function getOpt(opts: DiscordCommandOption[], name: string): string | undefined {
   return opts.find((o) => o.name === name)?.value as string | undefined;
@@ -56,6 +60,7 @@ export async function handleGenerate(
   const modeOpt     = coerceMode(getOpt(options, "mode"));
   const preview     = getBool(options, "preview");
   const allFlag     = getBool(options, "all");
+  const threadMode  = getBool(options, "thread");
 
   const globalConfig = await getGlobalConfig(env.USERS_KV);
   const userConfig = await getUserConfig(env.USERS_KV, requesterId);
@@ -67,14 +72,44 @@ export async function handleGenerate(
     // ── All group members ────────────────────────────────────────────────────
     if (allFlag) {
       const changelogs = await buildChangelogsForGroup(env.GITLAB_GROUP_ID, env, dateRange, mode, filters);
-      let posted = 0;
+      const period    = dateRange.isoWeek ?? dateRange.label;
+      const prevLabel = previousPeriodLabel(dateRange.isoWeek ?? "");
+
+      // Attach trends + AI summaries, cache stats
       for (const data of changelogs) {
         if (data.mergedMRs.length === 0 && data.staleMRs.length === 0) continue;
         data.aiSummary = await generateAISummary(env.AI, data, mode);
-        await postToChannel(env.DISCORD_CHANGELOG_CHANNEL_ID, buildChangelogEmbed(data), env.DISCORD_BOT_TOKEN);
-        posted++;
+
+        // Cache stats for future trend lookups
+        const stats = await computeUserStats(data.gitlabUsername, data.displayName, env, dateRange, filters)
+          .catch(() => null);
+        if (stats) {
+          await cacheStats(env.USERS_KV, period, stats);
+          const prevStats = await getCachedStats(env.USERS_KV, prevLabel, data.gitlabUsername).catch(() => null);
+          if (prevStats) data.trend = computeTrend(stats, prevStats, prevLabel);
+        }
       }
-      await patch(appId, token, { content: `✅ Posted changelogs for **${posted}** member(s) — ${dateRange.label}.` });
+
+      if (threadMode) {
+        const result = await postThreadedDigest({
+          channelId: env.DISCORD_CHANGELOG_CHANNEL_ID,
+          botToken:  env.DISCORD_BOT_TOKEN,
+          changelogs,
+          mode,
+          periodLabel: dateRange.label,
+        });
+        await patch(appId, token, {
+          content: `✅ Thread posted: **${result.posted}** members in thread, **${result.skipped}** skipped — ${dateRange.label}.`,
+        });
+      } else {
+        let posted = 0;
+        for (const data of changelogs) {
+          if (data.mergedMRs.length === 0 && data.staleMRs.length === 0) continue;
+          await postToChannel(env.DISCORD_CHANGELOG_CHANNEL_ID, buildChangelogEmbed(data), env.DISCORD_BOT_TOKEN);
+          posted++;
+        }
+        await patch(appId, token, { content: `✅ Posted changelogs for **${posted}** member(s) — ${dateRange.label}.` });
+      }
       return;
     }
 
@@ -135,6 +170,17 @@ export async function handleGenerate(
 
     const data = await buildChangelogForUser(gitlabUsername, displayName, env, dateRange, mode, filters);
     data.aiSummary = await generateAISummary(env.AI, data, mode);
+
+    // Cache stats + attach trend
+    const period    = dateRange.isoWeek ?? dateRange.label;
+    const prevLabel = previousPeriodLabel(dateRange.isoWeek ?? "");
+    const stats = await computeUserStats(gitlabUsername, displayName, env, dateRange, filters).catch(() => null);
+    if (stats) {
+      await cacheStats(env.USERS_KV, period, stats);
+      const prevStats = await getCachedStats(env.USERS_KV, prevLabel, gitlabUsername).catch(() => null);
+      if (prevStats) data.trend = computeTrend(stats, prevStats, prevLabel);
+    }
+
     return await finishAndPost(appId, token, env, data, preview);
 
   } catch (err) {

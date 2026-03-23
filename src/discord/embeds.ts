@@ -1,4 +1,5 @@
-import type { ChangelogData, DigestMode, GitLabStaleMR, EnrichedMR, UserStats, ReleaseData } from "../types";
+import type { ChangelogData, DigestMode, GitLabStaleMR, EnrichedMR, UserStats, ReleaseData, TrendData } from "../types";
+import { formatTrendLine } from "../gitlab/trends";
 
 const COLORS: Record<string, number> = {
   changelog: 0x2ecc71, pr: 0x3498db, "press-release": 0x9b59b6,
@@ -83,6 +84,11 @@ export function buildChangelogEmbed(data: ChangelogData): object {
     if (topLabels.length) stats.push(topLabels.join(", "));
 
     fields.push({ name: "📊 Stats", value: stats.join(" · "), inline: false });
+
+    // Trend / comparison
+    if (data.trend) {
+      fields.push({ name: "📈 Trend", value: formatTrendLine(data.trend), inline: false });
+    }
   }
 
   // Review activity
@@ -250,6 +256,101 @@ export function buildHealthEmbed(stats: {
       title: "🏥 Changelog Bot Health",
       color: stats.gitlabOk && stats.aiOk ? COLORS.health : COLORS.error,
       fields,
+      timestamp: new Date().toISOString(),
+    }],
+  };
+}
+
+// ─── Thread parent (team overview) embed ─────────────────────────────────────
+
+export function buildThreadParentEmbed(
+  changelogs: ChangelogData[],
+  periodLabel: string,
+  teamName?: string
+): object {
+  const active = changelogs.filter((d) => d.mergedMRs.length > 0);
+  const totalMRs    = active.reduce((s, d) => s + d.mergedMRs.length, 0);
+  const totalAdds   = active.reduce((s, d) => s + d.mergedMRs.reduce((a, m) => a + (m.diffStats?.additions ?? 0), 0), 0);
+  const totalDels   = active.reduce((s, d) => s + d.mergedMRs.reduce((a, m) => a + (m.diffStats?.deletions ?? 0), 0), 0);
+
+  // Top contributors
+  const sorted = [...active].sort((a, b) => b.mergedMRs.length - a.mergedMRs.length).slice(0, 5);
+  const topList = sorted.map((d) => `• **${d.displayName}** — ${d.mergedMRs.length} MRs`).join("\n");
+
+  const blockers = changelogs.reduce((s, d) => s + d.staleMRs.length, 0);
+
+  const fields: object[] = [
+    { name: "📦 Total MRs", value: String(totalMRs), inline: true },
+    { name: "👤 Active Members", value: String(active.length), inline: true },
+    { name: "📝 Lines Changed", value: totalAdds + totalDels > 0 ? `+${totalAdds}/-${totalDels}` : "—", inline: true },
+  ];
+  if (blockers > 0) fields.push({ name: "⚠️ Blockers", value: `${blockers} stale MRs across team`, inline: true });
+  if (topList) fields.push({ name: "🏆 Top Contributors", value: topList, inline: false });
+
+  return {
+    embeds: [{
+      title: `📋 ${teamName ? `${teamName} — ` : ""}Team Changelog`,
+      description: `Individual changelogs are in the thread below.\n**Period:** ${periodLabel}`,
+      color: 0x2ecc71,
+      fields,
+      footer: { text: `${changelogs.length} members · ${changelogs.length - active.length} with no activity` },
+      timestamp: new Date().toISOString(),
+    }],
+  };
+}
+
+// ─── Leaderboard embed ───────────────────────────────────────────────────────
+
+export type LeaderboardMetric = "mrs" | "lines" | "reviews" | "speed";
+
+export interface LeaderboardEntry {
+  rank: number;
+  stats: UserStats;
+  trend?: TrendData;
+}
+
+const MEDAL = ["🥇", "🥈", "🥉"];
+
+export function buildLeaderboardEmbed(
+  entries: LeaderboardEntry[],
+  metric: LeaderboardMetric,
+  periodLabel: string
+): object {
+  const metricLabels: Record<LeaderboardMetric, string> = {
+    mrs:     "Most MRs Merged",
+    lines:   "Most Lines Changed",
+    reviews: "Most Reviews Given",
+    speed:   "Fastest to Merge (avg)",
+  };
+
+  const rows = entries.slice(0, 10).map((e, i) => {
+    const { stats } = e;
+    const medal = MEDAL[i] ?? `**${i + 1}.**`;
+    let metricVal = "";
+    switch (metric) {
+      case "mrs":     metricVal = `${stats.mrsMerged} MRs`; break;
+      case "lines":   metricVal = `+${stats.totalAdditions}/-${stats.totalDeletions}`; break;
+      case "reviews": metricVal = `${stats.reviewActivity.reviewsGiven} reviews`; break;
+      case "speed":   metricVal = stats.mrsMerged > 0 ? `${stats.avgTimeToMerge}h avg` : "no MRs"; break;
+    }
+    const trendStr = e.trend ? ` · ${formatTrendLine(e.trend).replace(/^vs .+? · /, "")}` : "";
+    return `${medal} **${stats.displayName}** — ${metricVal}${trendStr}`;
+  });
+
+  const totalMRs    = entries.reduce((s, e) => s + e.stats.mrsMerged, 0);
+  const totalReviews = entries.reduce((s, e) => s + e.stats.reviewActivity.reviewsGiven, 0);
+
+  return {
+    embeds: [{
+      title: `🏆 Leaderboard — ${metricLabels[metric]}`,
+      description: rows.join("\n") || "_No activity found._",
+      color: 0xf1c40f,
+      fields: [
+        { name: "📦 Team Total MRs", value: String(totalMRs), inline: true },
+        { name: "🔍 Team Total Reviews", value: String(totalReviews), inline: true },
+        { name: "👥 Members Ranked", value: String(entries.length), inline: true },
+      ],
+      footer: { text: `Period: ${periodLabel} · Sorted by: ${metricLabels[metric]}` },
       timestamp: new Date().toISOString(),
     }],
   };

@@ -234,10 +234,21 @@ export interface ChangelogData {
   reviewActivity: ReviewActivity | null;
   aiSummary: string;
   format: DigestMode;
+  trend?: TrendData;       // optional comparison vs. previous equivalent period
   inputQuality: "high" | "medium" | "low";
   weekISO: string;
   weekStart: Date;
   weekEnd: Date;
+}
+
+// ─── Trend / comparison data ─────────────────────────────────────────────────
+
+export interface TrendData {
+  mrsDelta: number;        // positive = more this period
+  linesDelta: number;      // net change in additions + deletions
+  reviewsDelta: number;
+  reposDelta: number;
+  prevLabel: string;       // e.g. "2026-W11" or "30 days ago"
 }
 
 // ─── Release notes ────────────────────────────────────────────────────────────

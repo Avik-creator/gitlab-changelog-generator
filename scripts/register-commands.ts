@@ -114,6 +114,12 @@ const commands = [
             type: 5,
             required: false,
           },
+          {
+            name: "thread",
+            description: "Post all changelogs in a thread (use with all:true)",
+            type: 5,
+            required: false,
+          },
         ],
       },
 
@@ -151,6 +157,37 @@ const commands = [
           { name: "gitlab", description: "GitLab username — type to search",            type: 3, required: false, autocomplete: true },
           { name: "week",   description: "Which week — type to see options",            type: 3, required: false, autocomplete: true },
           { name: "range",  description: "Rolling range — type to see options",         type: 3, required: false, autocomplete: true },
+        ],
+      },
+
+      // ── /changelog leaderboard ───────────────────────────────────────────
+      {
+        name: "leaderboard",
+        description: "Rank team members by MRs, lines, reviews, or merge speed",
+        type: 1,
+        options: [
+          {
+            name: "metric",
+            description: "What to rank by (default: mrs)",
+            type: 3,
+            required: false,
+            choices: [
+              { name: "🏆 MRs Merged",            value: "mrs" },
+              { name: "📝 Lines Changed",          value: "lines" },
+              { name: "🔍 Reviews Given",          value: "reviews" },
+              { name: "⚡ Fastest to Merge (avg)", value: "speed" },
+            ],
+          },
+          { name: "week",  description: "Which week — type to see options",  type: 3, required: false, autocomplete: true },
+          { name: "range", description: "Rolling range — type to see options", type: 3, required: false, autocomplete: true },
+          { name: "from",  description: "Start date (YYYY-MM-DD)",           type: 3, required: false },
+          { name: "to",    description: "End date (YYYY-MM-DD)",             type: 3, required: false },
+          {
+            name: "trend",
+            description: "Show comparison vs previous period (default: true)",
+            type: 5,
+            required: false,
+          },
         ],
       },
 

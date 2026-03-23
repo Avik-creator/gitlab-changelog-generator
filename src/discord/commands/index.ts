@@ -6,6 +6,7 @@ import { handleHealth } from "./health";
 import { handleConfig } from "./config";
 import { handleStats } from "./stats";
 import { handleRelease } from "./release";
+import { handleLeaderboard } from "./leaderboard";
 import { buildChangelogEmbed } from "../embeds";
 import { handleAutocomplete } from "../autocomplete";
 
@@ -84,7 +85,8 @@ async function dispatchChangelog(
     case "unlink":   return handleUnlink(appId, token, opts, env);
     case "list":     return handleList(appId, token, env);
     case "health":   return handleHealth(appId, token, env);
-    case "stats":    return handleStats(appId, token, opts, env, userId);
+    case "stats":       return handleStats(appId, token, opts, env, userId);
+    case "leaderboard": return handleLeaderboard(appId, token, opts, env, userId);
     case "config": {
       const inner = opts[0];
       if (!inner) return;
