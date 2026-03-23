@@ -215,6 +215,20 @@ export class GitLabClient {
     return this.paginateAll<GitLabProject>(`/groups/${groupId}/projects`, { include_subgroups: "true" });
   }
 
+  /**
+   * Single-page project fetch for autocomplete.
+   * Returns up to 100 projects ordered by most recent activity — one API call, fast enough
+   * to fit within Discord's 3-second autocomplete deadline.
+   */
+  async getGroupProjectsForAutocomplete(groupId: string): Promise<GitLabProject[]> {
+    return this.fetch<GitLabProject[]>(`/groups/${groupId}/projects`, {
+      include_subgroups: "true",
+      per_page: "100",
+      order_by: "last_activity_at",
+      sort: "desc",
+    });
+  }
+
   async findProjectByPath(pathOrName: string): Promise<GitLabProject | null> {
     try {
       return await this.fetch<GitLabProject>(`/projects/${encodeURIComponent(pathOrName)}`);

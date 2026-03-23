@@ -6,7 +6,7 @@
  * Results are cached in KV with short TTLs to keep GitLab API calls minimal.
  */
 
-import type { Env, DiscordInteraction, DiscordCommandOption } from "../types";
+import type { Env, DiscordInteraction, DiscordCommandOption, GitLabProject } from "../types";
 import { GitLabClient } from "../gitlab/client";
 import { getAllMappings } from "../kv/users";
 
@@ -54,13 +54,26 @@ async function suggestGitlabUsers(env: Env, query: string): Promise<Autocomplete
 
 /** GitLab group projects — for the `project` field */
 async function suggestProjects(env: Env, query: string): Promise<AutocompleteChoice[]> {
-  const projects = await cached(env.USERS_KV, `projects:${env.GITLAB_GROUP_ID}`, async () => {
-    const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
-    return client.getGroupProjects(env.GITLAB_GROUP_ID);
-  });
+  const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
+
+  // Try KV cache first (5-min TTL), then do a single-page fetch — no pagination
+  // so we always stay inside Discord's 3-second autocomplete deadline.
+  const cacheKey = `projects:${env.GITLAB_GROUP_ID}`;
+  const raw = await env.USERS_KV.get(`ac:${cacheKey}`).catch(() => null);
+
+  let projects: GitLabProject[];
+  if (raw) {
+    projects = JSON.parse(raw) as GitLabProject[];
+  } else {
+    projects = await client.getGroupProjectsForAutocomplete(env.GITLAB_GROUP_ID);
+    await env.USERS_KV.put(`ac:${cacheKey}`, JSON.stringify(projects), { expirationTtl: CACHE_TTL })
+      .catch(() => { /* non-fatal */ });
+  }
 
   const choices: AutocompleteChoice[] = projects.map((p) => ({
-    name: `${p.name} (${p.path_with_namespace})`,
+    name: p.name_with_namespace.length <= 100
+      ? p.name_with_namespace
+      : p.name,
     value: p.path_with_namespace,
   }));
 
@@ -229,8 +242,10 @@ export async function handleAutocomplete(
         break;
     }
   } catch (err) {
-    console.error("Autocomplete error:", err);
-    // Return empty on error — don't crash the interaction
+    // Expose the error as a single disabled-looking choice so it's visible in Discord
+    const msg = String(err).slice(0, 90);
+    console.error(`Autocomplete error [${name}]:`, err);
+    choices = [{ name: `⚠️ Error: ${msg}`, value: "__error__" }];
   }
 
   return Response.json({ type: 8, data: { choices } });
