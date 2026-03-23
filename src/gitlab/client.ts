@@ -314,7 +314,7 @@ export class GitLabClient {
       let projectName = `Project ${mr.project_id}`;
       try {
         const parts = new URL(mr.web_url).pathname.split("/-/")[0].split("/").filter(Boolean);
-        if (parts.length > 0) projectName = parts[parts.length - 1];
+        projectName = parts.at(-1) ?? projectName;
       } catch { /* best-effort */ }
       return { title: mr.title, web_url: mr.web_url, projectName };
     });
