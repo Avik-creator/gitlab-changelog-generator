@@ -29,19 +29,80 @@ function mrLine(mr: EnrichedMR): string {
   return `• [${truncate(mr.title, 50)}](${mr.web_url})${diff}${labels}${milestone}`;
 }
 
-/** Split a list of MRs into multiple embed fields to stay within Discord's 1024-char limit. */
-function mrFields(projectName: string, mrs: EnrichedMR[]): object[] {
-  const CHUNK = 10;
-  const fields: object[] = [];
-  for (let i = 0; i < mrs.length; i += CHUNK) {
-    const chunk = mrs.slice(i, i + CHUNK);
-    const suffix = mrs.length > CHUNK
-      ? ` (${i + 1}–${Math.min(i + CHUNK, mrs.length)} of ${mrs.length})`
-      : ` (${mrs.length})`;
-    const name = i === 0 ? `📦 ${projectName}${suffix}` : `📦 ${projectName} ${suffix}`;
-    fields.push({ name, value: chunk.map(mrLine).join("\n"), inline: false });
+/**
+ * Split MRs into embed fields that are GUARANTEED to stay within 1024 chars.
+ *
+ * The old fixed-chunk approach (every 10 MRs) caused `safeEmbed()` to truncate
+ * mid-line, cutting Discord markdown links like `[title](` without the `)` and
+ * making them render as plain text. This version adds MR lines one-by-one and
+ * starts a new field the moment the next line would push over the limit.
+ */
+function mrFields(projectName: string, mrs: EnrichedMR[], totalInScope?: number): EmbedField[] {
+  const MAX_VALUE = 950; // Discord hard limit is 1024; keep a safe margin
+  const fields: EmbedField[] = [];
+  let lines: string[] = [];
+  let charLen = 0;
+  let startIdx = 0;
+
+  const flush = (endIdx: number) => {
+    if (lines.length === 0) return;
+    const total = totalInScope ?? mrs.length;
+    const rangeStr = total > lines.length
+      ? ` (${startIdx + 1}–${endIdx} of ${total})`
+      : ` (${total})`;
+    const name = fields.length === 0
+      ? `📦 ${projectName}${rangeStr}`
+      : `📦 ${projectName} ${rangeStr}`;
+    fields.push({ name: name.slice(0, 256), value: lines.join("\n"), inline: false });
+    startIdx = endIdx;
+    lines   = [];
+    charLen = 0;
+  };
+
+  for (let i = 0; i < mrs.length; i++) {
+    const line    = mrLine(mrs[i]!);
+    const addCost = charLen === 0 ? line.length : line.length + 1; // +1 for the "\n"
+    if (addCost + charLen > MAX_VALUE && lines.length > 0) flush(i);
+    lines.push(line);
+    charLen += addCost;
   }
+  flush(mrs.length);
+
   return fields;
+}
+
+export const MR_PAGE_SIZE = 15; // MRs shown per paginated page
+
+/** Discord action-row with Previous / Page-counter / Next buttons. */
+export function buildMRPageButtons(
+  jobKey: string,
+  currentPage: number,
+  totalPages: number
+): object[] {
+  if (totalPages <= 1) return [];
+  return [{
+    type: 1,
+    components: [
+      {
+        type: 2, style: 2,
+        custom_id: `mrpage_go:${jobKey}:${currentPage - 1}`,
+        label: "◀ Prev",
+        disabled: currentPage === 0,
+      },
+      {
+        type: 2, style: 2,
+        custom_id: `__noop__:${jobKey}`,
+        label: `Page ${currentPage + 1} / ${totalPages}`,
+        disabled: true,
+      },
+      {
+        type: 2, style: 1,
+        custom_id: `mrpage_go:${jobKey}:${currentPage + 1}`,
+        label: "Next ▶",
+        disabled: currentPage >= totalPages - 1,
+      },
+    ],
+  }];
 }
 
 function staleLine(mr: GitLabStaleMR): string {
@@ -126,8 +187,23 @@ function safeEmbed(embed: {
 
 // ─── Main changelog embed ─────────────────────────────────────────────────────
 
-export function buildChangelogEmbed(data: ChangelogData): object {
+export interface BuildChangelogOpts {
+  /** Zero-based page index for MR pagination (default 0). */
+  page?:       number;
+  /** KV job key — required to enable pagination buttons. */
+  jobKey?:     string;
+  /** Total number of pages — required to enable pagination buttons. */
+  totalPages?: number;
+}
+
+export function buildChangelogEmbed(data: ChangelogData, opts: BuildChangelogOpts = {}): object {
   const { format, mergedMRs, staleMRs, openMRs, filteredOutCount, reviewActivity } = data;
+  const page       = opts.page ?? 0;
+  const jobKey     = opts.jobKey;
+  const totalPages = opts.totalPages ?? (mergedMRs.length > MR_PAGE_SIZE ? Math.ceil(mergedMRs.length / MR_PAGE_SIZE) : 1);
+
+  // Slice MRs for the current page
+  const pageMRs    = mergedMRs.slice(page * MR_PAGE_SIZE, (page + 1) * MR_PAGE_SIZE);
   const hasActivity = mergedMRs.length > 0;
   const color       = hasActivity ? (COLORS[format] ?? COLORS.changelog) : COLORS.empty;
   const icon        = FORMAT_ICONS[format] ?? "✨";
@@ -135,10 +211,12 @@ export function buildChangelogEmbed(data: ChangelogData): object {
     ? `${data.displayName}'s`
     : `${data.displayName}`;
 
+  const pageLabel   = totalPages > 1 ? ` · Page ${page + 1}/${totalPages}` : "";
+
   const fields: EmbedField[] = [];
 
-  // AI summary
-  if (data.aiSummary?.trim()) {
+  // AI summary — only on first page so it doesn't repeat
+  if (page === 0 && data.aiSummary?.trim()) {
     fields.push({
       name:   `${icon} ${format.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`,
       value:  truncate(data.aiSummary, EMBED_FIELD_MAX),
@@ -146,82 +224,90 @@ export function buildChangelogEmbed(data: ChangelogData): object {
     });
   }
 
-  // MRs grouped by project
+  // MRs for this page, grouped by project, character-aware (no broken links)
   if (hasActivity) {
-    const grouped    = groupByProject(mergedMRs);
+    const grouped    = groupByProject(pageMRs);
     let   totalFiles = 0;
 
     for (const [projectName, mrs] of grouped) {
-      for (const f of mrFields(projectName, mrs)) fields.push(f as EmbedField);
+      // Pass the total count for this project so the "(X–Y of Z)" range is correct
+      const totalForProject = mergedMRs.filter((m) => m.projectName === projectName).length;
+      const projectPageOffset = page * MR_PAGE_SIZE;
+      // Only show the subset that belongs to this page (already filtered via pageMRs above)
+      for (const f of mrFields(projectName, mrs, totalForProject > MR_PAGE_SIZE ? totalForProject : undefined)) {
+        fields.push(f);
+      }
       for (const mr of mrs) {
         if (mr.diffStats) totalFiles += mr.diffStats.additions;
       }
     }
 
-    // Stats bar
-    const stats = [`**${mergedMRs.length}** MRs merged`];
-    if (totalFiles > 0) stats.push(`**${totalFiles}** files changed`);
-    if (grouped.size > 1) stats.push(`**${grouped.size}** projects`);
-    if (filteredOutCount > 0) stats.push(`${filteredOutCount} filtered out`);
+    // Stats bar — only on first page
+    if (page === 0) {
+      const stats = [`**${mergedMRs.length}** MRs merged`];
+      if (totalFiles > 0) stats.push(`**${totalFiles}** files changed`);
+      const allGrouped = groupByProject(mergedMRs);
+      if (allGrouped.size > 1) stats.push(`**${allGrouped.size}** projects`);
+      if (filteredOutCount > 0) stats.push(`${filteredOutCount} filtered out`);
 
-    const labelCounts = new Map<string, number>();
-    for (const mr of mergedMRs) for (const l of mr.labels) labelCounts.set(l, (labelCounts.get(l) ?? 0) + 1);
-    const topLabels = [...labelCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([l]) => l);
-    if (topLabels.length) stats.push(topLabels.join(", "));
+      const labelCounts = new Map<string, number>();
+      for (const mr of mergedMRs) for (const l of mr.labels) labelCounts.set(l, (labelCounts.get(l) ?? 0) + 1);
+      const topLabels = [...labelCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([l]) => l);
+      if (topLabels.length) stats.push(topLabels.join(", "));
 
-    const statsValue = stats.join(" · ");
-    if (statsValue.trim()) {
-      fields.push({ name: "📊 Stats", value: statsValue, inline: false });
-    }
+      const statsValue = stats.join(" · ");
+      if (statsValue.trim()) fields.push({ name: "📊 Stats", value: statsValue, inline: false });
 
-    // Trend
-    if (data.trend) {
-      const trendLine = formatTrendLine(data.trend);
-      if (trendLine?.trim()) {
-        fields.push({ name: "📈 Trend", value: trendLine, inline: false });
+      if (data.trend) {
+        const trendLine = formatTrendLine(data.trend);
+        if (trendLine?.trim()) fields.push({ name: "📈 Trend", value: trendLine, inline: false });
       }
     }
   }
 
-  // Review activity
-  if (reviewActivity && reviewActivity.reviewsGiven > 0) {
-    const parts = [`${reviewActivity.reviewsGiven} reviews`];
-    if (reviewActivity.approvals > 0)           parts.push(`${reviewActivity.approvals} approvals`);
-    if (reviewActivity.commentsLeft > 0)         parts.push(`${reviewActivity.commentsLeft} comments`);
-    if (reviewActivity.discussionsResolved > 0)  parts.push(`${reviewActivity.discussionsResolved} resolved`);
-    fields.push({ name: "🔍 Review Activity", value: parts.join(" · "), inline: false });
-  }
-
-  // Open / in-progress MRs
-  if (openMRs.length > 0) {
-    const lines = openMRs.slice(0, 5)
-      .map((mr) => `• [${truncate(mr.title, 55)}](${mr.web_url}) · \`${mr.projectName}\``)
-      .join("\n");
-    if (lines.trim()) {
-      fields.push({ name: `🔄 In Progress (${openMRs.length})`, value: truncate(lines, EMBED_FIELD_MAX), inline: false });
+  // Non-MR sections — only on first page
+  if (page === 0) {
+    if (reviewActivity && reviewActivity.reviewsGiven > 0) {
+      const parts = [`${reviewActivity.reviewsGiven} reviews`];
+      if (reviewActivity.approvals > 0)          parts.push(`${reviewActivity.approvals} approvals`);
+      if (reviewActivity.commentsLeft > 0)        parts.push(`${reviewActivity.commentsLeft} comments`);
+      if (reviewActivity.discussionsResolved > 0) parts.push(`${reviewActivity.discussionsResolved} resolved`);
+      fields.push({ name: "🔍 Review Activity", value: parts.join(" · "), inline: false });
     }
-  }
 
-  // Stale / blocked
-  if (staleMRs.length > 0) {
-    const lines = staleMRs.slice(0, 5).map(staleLine).join("\n");
-    const extra = staleMRs.length > 5 ? `\n_+${staleMRs.length - 5} more_` : "";
-    const val   = (lines + extra).trim();
-    if (val) {
-      fields.push({ name: `⚠️ Blockers (${staleMRs.length})`, value: truncate(val, EMBED_FIELD_MAX), inline: false });
+    if (openMRs.length > 0) {
+      const lines = openMRs.slice(0, 5)
+        .map((mr) => `• [${truncate(mr.title, 55)}](${mr.web_url}) · \`${mr.projectName}\``)
+        .join("\n");
+      if (lines.trim()) fields.push({ name: `🔄 In Progress (${openMRs.length})`, value: truncate(lines, EMBED_FIELD_MAX), inline: false });
+    }
+
+    if (staleMRs.length > 0) {
+      const lines = staleMRs.slice(0, 5).map(staleLine).join("\n");
+      const extra = staleMRs.length > 5 ? `\n_+${staleMRs.length - 5} more_` : "";
+      const val   = (lines + extra).trim();
+      if (val) fields.push({ name: `⚠️ Blockers (${staleMRs.length})`, value: truncate(val, EMBED_FIELD_MAX), inline: false });
     }
   }
 
   const footerText = `${data.weekISO || data.dateRange.label} · ${data.inputQuality} quality · GitLab Changelog Bot`;
 
-  return safeEmbed({
-    title:       `📋 ${scopeLabel} Changelog`,
+  const baseEmbed = safeEmbed({
+    title:       `📋 ${scopeLabel} Changelog${pageLabel}`,
     description: hasActivity ? undefined : `_No activity found for ${data.dateRange.label}._`,
     color,
     fields,
     footer:      { text: footerText },
     timestamp:   new Date().toISOString(),
   });
+
+  // Attach pagination buttons if there are multiple pages and we have a job key
+  const pageButtons = jobKey ? buildMRPageButtons(jobKey, page, totalPages) : [];
+
+  return {
+    ...(baseEmbed as Record<string, unknown>),
+    ...(pageButtons.length > 0 ? { components: pageButtons } : {}),
+  };
 }
 
 // ─── Stats embed ──────────────────────────────────────────────────────────────

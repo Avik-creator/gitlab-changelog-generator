@@ -8,7 +8,7 @@ import {
   computeUserStats,
 } from "../../gitlab/changelog";
 import { generateAISummary } from "../../ai/summarize";
-import { buildChangelogEmbed, buildErrorEmbed, buildPreviewComponents } from "../embeds";
+import { buildChangelogEmbed, buildErrorEmbed, buildPreviewComponents, MR_PAGE_SIZE } from "../embeds";
 import { getGitlabUsername } from "../../kv/users";
 import { getGlobalConfig, getUserConfig, resolveFilters, resolveStyle } from "../../kv/config";
 import { GitLabClient } from "../../gitlab/client";
@@ -240,24 +240,47 @@ export async function handleGenerate(
   }
 }
 
+function makeJobKey(data: import("../../types").ChangelogData): string {
+  const scope  = data.scope.value || data.gitlabUsername || "unknown";
+  const period = data.weekISO || data.dateRange.label;
+  return `${scope}_${period}`.replace(/[^a-z0-9_]/gi, "_").slice(0, 60);
+}
+
 async function finishAndPost(
   appId: string, token: string, env: Env,
   data: import("../../types").ChangelogData, preview: boolean
 ): Promise<void> {
-  const embed = buildChangelogEmbed(data);
+  const jobKey    = makeJobKey(data);
+  const totalPages = Math.ceil((data.mergedMRs.length || 1) / MR_PAGE_SIZE);
+  const isPaginated = totalPages > 1;
+
+  // Always store for pagination lookups (1hr TTL)
+  if (isPaginated) {
+    await env.USERS_KV.put(
+      `mrpages:${jobKey}`,
+      JSON.stringify({ data, totalPages }),
+      { expirationTtl: 3600 }
+    );
+  }
+
+  const embedOpts = isPaginated ? { page: 0, jobKey, totalPages } : {};
 
   if (preview) {
-    const jobKey = `${data.scope.value || data.gitlabUsername}_${data.weekISO || "range"}`.replace(/[^a-z0-9_]/gi, "_");
     await env.USERS_KV.put(`preview:${jobKey}`, JSON.stringify(data), { expirationTtl: 3600 });
+    const embed = buildChangelogEmbed(data, embedOpts);
     await patch(appId, token, {
       ...(embed as Record<string, unknown>),
       content: `👀 **Preview** — ${data.dateRange.label}. Approve to post publicly.`,
-      components: buildPreviewComponents(jobKey),
+      components: [
+        ...(buildPreviewComponents(jobKey) as object[]),
+        // pagination buttons are already embedded inside buildChangelogEmbed's components
+      ],
       flags: 64,
     });
     return;
   }
 
+  const embed = buildChangelogEmbed(data, embedOpts);
   await postToChannel(env.DISCORD_CHANGELOG_CHANNEL_ID, embed, env.DISCORD_BOT_TOKEN);
   await patch(appId, token, { content: `✅ Changelog for **${data.displayName}** posted — ${data.dateRange.label}.` });
 }

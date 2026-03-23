@@ -42,7 +42,9 @@ export async function routeInteraction(
   // Button / select components
   if (interaction.type === 3) {
     const customId = interaction.data?.custom_id ?? "";
-    ctx.waitUntil(handleComponent(customId, env));
+    const appId    = env.DISCORD_APPLICATION_ID;
+    const token    = interaction.token;
+    ctx.waitUntil(handleComponent(customId, env, appId, token));
     return Response.json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
   }
 
@@ -120,30 +122,62 @@ async function dispatchRelease(
   if (sub === "generate") return handleRelease(appId, token, opts, env);
 }
 
-async function handleComponent(customId: string, env: Env): Promise<void> {
-  const idx = customId.indexOf(":");
+async function handleComponent(
+  customId: string, env: Env, appId: string, token: string
+): Promise<void> {
+  const idx    = customId.indexOf(":");
   if (idx === -1) return;
   const action = customId.slice(0, idx);
-  const jobKey = customId.slice(idx + 1);
+  const rest   = customId.slice(idx + 1);
 
-  if (action === "changelog_discard") {
-    await env.USERS_KV.delete(`preview:${jobKey}`);
-    return;
-  }
-
+  // ── Preview: approve ─────────────────────────────────────────────────────
   if (action === "changelog_approve") {
-    const raw = await env.USERS_KV.get(`preview:${jobKey}`);
+    const raw = await env.USERS_KV.get(`preview:${rest}`);
     if (!raw) return;
-    const data = JSON.parse(raw) as ChangelogData;
+    const data  = JSON.parse(raw) as ChangelogData;
     const embed = buildChangelogEmbed(data);
     await fetch(`https://discord.com/api/v10/channels/${env.DISCORD_CHANGELOG_CHANNEL_ID}/messages`, {
       method: "POST",
-      headers: {
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify(embed),
     });
-    await env.USERS_KV.delete(`preview:${jobKey}`);
+    await env.USERS_KV.delete(`preview:${rest}`);
+    return;
   }
+
+  // ── Preview: discard ─────────────────────────────────────────────────────
+  if (action === "changelog_discard") {
+    await env.USERS_KV.delete(`preview:${rest}`);
+    return;
+  }
+
+  // ── MR pagination: navigate to a specific page ───────────────────────────
+  if (action === "mrpage_go") {
+    const parts   = rest.split(":");
+    const jobKey  = parts.slice(0, -1).join(":"); // everything except last segment
+    const page    = parseInt(parts[parts.length - 1] ?? "0");
+
+    const raw = await env.USERS_KV.get(`mrpages:${jobKey}`);
+    if (!raw) {
+      // Data expired — tell the user gracefully
+      await fetch(`https://discord.com/api/v10/webhooks/${appId}/${token}/messages/@original`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "⚠️ Pagination data expired. Please regenerate the changelog.", components: [] }),
+      });
+      return;
+    }
+
+    const { data, totalPages } = JSON.parse(raw) as { data: ChangelogData; totalPages: number };
+    const embed = buildChangelogEmbed(data, { page, jobKey, totalPages });
+    await fetch(`https://discord.com/api/v10/webhooks/${appId}/${token}/messages/@original`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(embed),
+    });
+    return;
+  }
+
+  // __noop__ buttons (disabled page counter button)
+  if (action === "__noop__") return;
 }
