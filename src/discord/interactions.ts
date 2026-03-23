@@ -1,34 +1,38 @@
 /**
- * Verifies the Ed25519 signature sent by Discord on every interaction.
+ * Ed25519 Discord interaction signature verification.
  * Uses the Web Crypto API available in Cloudflare Workers.
  */
 export async function verifyDiscordSignature(
-  publicKey: string,
-  signature: string,
-  timestamp: string,
-  body: string
+  request: Request,
+  rawBody: string,
+  publicKey: string
 ): Promise<boolean> {
-  try {
-    const encoder = new TextEncoder();
-    const keyBytes = hexToUint8Array(publicKey);
-    const sigBytes = hexToUint8Array(signature);
-    const msgBytes = encoder.encode(timestamp + body);
+  const signature = request.headers.get("X-Signature-Ed25519");
+  const timestamp = request.headers.get("X-Signature-Timestamp");
 
-    const cryptoKey = await crypto.subtle.importKey(
+  if (!signature || !timestamp) return false;
+
+  try {
+    const key = await crypto.subtle.importKey(
       "raw",
-      keyBytes,
-      { name: "Ed25519", namedCurve: "Ed25519" },
+      hexToBytes(publicKey),
+      { name: "Ed25519" },
       false,
       ["verify"]
     );
 
-    return await crypto.subtle.verify("Ed25519", cryptoKey, sigBytes, msgBytes);
+    return crypto.subtle.verify(
+      "Ed25519",
+      key,
+      hexToBytes(signature),
+      new TextEncoder().encode(timestamp + rawBody)
+    );
   } catch {
     return false;
   }
 }
 
-function hexToUint8Array(hex: string): Uint8Array {
+function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < hex.length; i += 2) {
     bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);

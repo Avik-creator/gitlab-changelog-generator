@@ -14,6 +14,10 @@ binding = "USERS_KV"
 id = "7e97fcea82fd4ca99b7bbbdd0db9d355"
 preview_id = "7e97fcea82fd4ca99b7bbbdd0db9d355"
 
+[[migrations]]
+tag = "v2"
+deleted_classes = ["ChangelogRegistry"]
+
 [vars]
 DISCORD_APPLICATION_ID = "1480908278841217204"
 GITLAB_BASE_URL = "https://gitlab.com"

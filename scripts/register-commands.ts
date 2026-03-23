@@ -1,132 +1,129 @@
 /**
- * Run once to register /changelog slash commands with Discord.
+ * Register /changelog slash commands with Discord.
+ * Run once (or whenever the command structure changes):
  *
- * Usage:
- *   bun run scripts/register-commands.ts
- *
- * Requires env vars:
- *   DISCORD_APPLICATION_ID
- *   DISCORD_BOT_TOKEN
+ *   bun run register-commands
  */
 
-const APP_ID = process.env.DISCORD_APPLICATION_ID;
-const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const APP_ID   = process.env.DISCORD_APPLICATION_ID!;
+const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN!;
 
 if (!APP_ID || !BOT_TOKEN) {
-  console.error("Missing DISCORD_APPLICATION_ID or DISCORD_BOT_TOKEN environment variables.");
+  console.error("Set DISCORD_APPLICATION_ID and DISCORD_BOT_TOKEN in .dev.vars");
   process.exit(1);
 }
+
+const FORMAT_CHOICES = [
+  { name: "✨ Changelog  — professional prose summary",              value: "changelog" },
+  { name: "🔧 PR Notes  — technical bullet-point release notes",    value: "pr" },
+  { name: "📣 Press Release  — non-technical stakeholder summary",  value: "press-release" },
+  { name: "📝 Release Notes  — structured Features/Fixes",          value: "release-notes" },
+  { name: "⚡ Concise  — 2-sentence TL;DR",                          value: "concise" },
+];
 
 const commands = [
   {
     name: "changelog",
-    description: "Generate GitLab changelogs for team members",
+    description: "GitLab Changelog Bot",
     options: [
-      // -----------------------------------------------------------------------
-      // Subcommand: generate
-      // -----------------------------------------------------------------------
+      // ─── /changelog generate ──────────────────────────────────────────────
       {
         name: "generate",
-        description: "Generate a changelog for a user or all registered team members",
-        type: 1, // SUB_COMMAND
+        description: "Generate a changelog from GitLab activity",
+        type: 1,
         options: [
           {
             name: "user",
-            description: "Discord user to generate a changelog for",
-            type: 6, // USER
+            description: "Discord user to generate for (default: you)",
+            type: 6,        // USER
             required: false,
           },
           {
-            name: "gitlab_username",
-            description: "GitLab username (alternative to Discord mention)",
-            type: 3, // STRING
+            name: "gitlab",
+            description: "GitLab username directly, e.g. john.doe (no link required)",
+            type: 3,
             required: false,
           },
           {
             name: "all",
-            description: "Generate for all registered team members",
-            type: 5, // BOOLEAN
+            description: "Generate for every member of the GitLab group",
+            type: 5,        // BOOLEAN
+            required: false,
+          },
+          {
+            name: "week",
+            description: "Which week? last (default), this, 2026-W12, or 2 (weeks ago)",
+            type: 3,
             required: false,
           },
           {
             name: "format",
-            description: "Output format for the AI summary (default: changelog)",
-            type: 3, // STRING
+            description: "Output format (default: changelog)",
+            type: 3,
             required: false,
-            choices: [
-              {
-                name: "📋 Changelog  — prose summary of what shipped",
-                value: "changelog",
-              },
-              {
-                name: "🔧 PR Notes  — technical bullet-point release notes",
-                value: "pr",
-              },
-              {
-                name: "📣 Press Release  — non-technical announcement for stakeholders",
-                value: "press-release",
-              },
-            ],
+            choices: FORMAT_CHOICES,
+          },
+          {
+            name: "preview",
+            description: "Show a private preview before posting publicly (default: false)",
+            type: 5,
+            required: false,
           },
         ],
       },
-      // -----------------------------------------------------------------------
-      // Subcommand: register
-      // -----------------------------------------------------------------------
+
+      // ─── /changelog link ──────────────────────────────────────────────────
       {
-        name: "register",
-        description: "Link a Discord user to their GitLab username",
-        type: 1, // SUB_COMMAND
+        name: "link",
+        description: "Link a Discord user to their GitLab username (validates against group)",
+        type: 1,
         options: [
-          {
-            name: "discord_user",
-            description: "The Discord user to link",
-            type: 6, // USER
-            required: true,
-          },
-          {
-            name: "gitlab_username",
-            description: "Their GitLab username",
-            type: 3, // STRING
-            required: true,
-          },
+          { name: "user",   description: "Discord user",       type: 6, required: true },
+          { name: "gitlab", description: "GitLab username",    type: 3, required: true },
         ],
       },
-      // -----------------------------------------------------------------------
-      // Subcommand: list
-      // -----------------------------------------------------------------------
+
+      // ─── /changelog unlink ───────────────────────────────────────────────
+      {
+        name: "unlink",
+        description: "Remove a Discord ↔ GitLab link",
+        type: 1,
+        options: [
+          { name: "user", description: "Discord user to unlink", type: 6, required: true },
+        ],
+      },
+
+      // ─── /changelog list ─────────────────────────────────────────────────
       {
         name: "list",
-        description: "List all registered team members",
-        type: 1, // SUB_COMMAND
+        description: "Show GitLab group members and their Discord links",
+        type: 1,
+      },
+
+      // ─── /changelog health ───────────────────────────────────────────────
+      {
+        name: "health",
+        description: "Check GitLab API reachability, AI status, and link count",
+        type: 1,
       },
     ],
   },
 ];
 
-async function registerCommands() {
-  const url = `https://discord.com/api/v10/applications/${APP_ID}/commands`;
+const res = await fetch(`https://discord.com/api/v10/applications/${APP_ID}/commands`, {
+  method: "PUT",
+  headers: {
+    Authorization: `Bot ${BOT_TOKEN}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify(commands),
+});
 
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bot ${BOT_TOKEN}`,
-    },
-    body: JSON.stringify(commands),
-  });
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    console.error("Failed to register commands:", JSON.stringify(data, null, 2));
-    process.exit(1);
-  }
-
-  console.log("✅ Slash commands registered successfully:");
-  for (const cmd of data as { name: string; id: string }[]) {
-    console.log(`  /${cmd.name}  (id: ${cmd.id})`);
-  }
+if (res.ok) {
+  const registered = await res.json() as Array<{ name: string }>;
+  console.log(`✅ Registered ${registered.length} command(s):`);
+  for (const cmd of registered) console.log(`  • /${cmd.name}`);
+} else {
+  console.error("❌ Failed:", res.status, await res.text());
+  process.exit(1);
 }
-
-registerCommands();

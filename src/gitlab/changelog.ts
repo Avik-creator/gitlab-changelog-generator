@@ -1,53 +1,72 @@
-import type { ChangelogData, Env, UserMapping } from "../types";
 import { GitLabClient } from "./client";
+import type { Env, ChangelogData, ChangelogFormat } from "../types";
+import { parseWeek } from "../utils/weeks";
 
-export function getWeekRange(): { weekStart: Date; weekEnd: Date } {
-  const now = new Date();
-  const weekEnd = new Date(now);
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - 7);
-  weekStart.setHours(0, 0, 0, 0);
-  return { weekStart, weekEnd };
-}
-
+/**
+ * Build a changelog for a single GitLab user over the given ISO week.
+ * displayName is whatever label to show (GitLab name, Discord username, etc.)
+ */
 export async function buildChangelogForUser(
-  user: UserMapping,
+  gitlabUsername: string,
+  displayName: string,
   env: Env,
-  weekStart: Date,
-  weekEnd: Date
+  weekISO: string,
+  format: ChangelogFormat
 ): Promise<ChangelogData> {
+  const week = parseWeek(weekISO);
   const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
 
-  const mergedMRs = await client.getMergedMRsByAuthor(
-    env.GITLAB_GROUP_ID,
-    user.gitlabUsername,
-    weekStart,
-    weekEnd
-  );
+  const [mergedMRs, staleMRs] = await Promise.all([
+    client.getEnrichedMRs(env.GITLAB_GROUP_ID, gitlabUsername, week.weekStart, week.weekEnd),
+    client.getEnrichedStaleMRs(env.GITLAB_GROUP_ID, [gitlabUsername]),
+  ]);
 
-  // Fetch project names and commits in parallel (cap at 10 MRs to stay within limits)
-  const capped = mergedMRs.slice(0, 10);
+  return {
+    gitlabUsername,
+    displayName,
+    mergedMRs,
+    staleMRs,
+    aiSummary: "",
+    weekISO: week.weekISO,
+    weekStart: week.weekStart,
+    weekEnd: week.weekEnd,
+    format,
+  };
+}
 
-  const enriched = await Promise.all(
-    capped.map(async (mr) => {
-      const [project, commits] = await Promise.all([
-        client.getProject(mr.project_id).catch(() => ({ name: "Unknown", id: mr.project_id, name_with_namespace: "Unknown", web_url: "" })),
-        client.getMRCommits(mr.project_id, mr.iid),
+/**
+ * Build a combined changelog for all members of a GitLab group.
+ * Used by the weekly cron and /changelog generate all:true.
+ */
+export async function buildChangelogForGroup(
+  groupId: string,
+  env: Env,
+  weekISO: string,
+  format: ChangelogFormat
+): Promise<ChangelogData[]> {
+  const week = parseWeek(weekISO);
+  const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
+
+  const members = await client.getGroupMembers(groupId, true);
+
+  return Promise.all(
+    members.map(async (member) => {
+      const [mergedMRs, staleMRs] = await Promise.all([
+        client.getEnrichedMRs(groupId, member.username, week.weekStart, week.weekEnd),
+        client.getEnrichedStaleMRs(groupId, [member.username]),
       ]);
 
       return {
-        ...mr,
-        projectName: project.name,
-        commits,
+        gitlabUsername: member.username,
+        displayName: member.name,
+        mergedMRs,
+        staleMRs,
+        aiSummary: "",
+        weekISO: week.weekISO,
+        weekStart: week.weekStart,
+        weekEnd: week.weekEnd,
+        format,
       };
     })
   );
-
-  return {
-    user,
-    mergedMRs: enriched,
-    aiSummary: "",
-    weekStart,
-    weekEnd,
-  };
 }

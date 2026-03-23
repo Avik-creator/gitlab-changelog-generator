@@ -7,8 +7,11 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "register-commands": "bun run scripts/register-commands.ts",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.scripts.json --noEmit",
     "kv:create": "wrangler kv namespace create USERS_KV",
-    "tail": "wrangler tail"
+    "queue:create": "wrangler queues create changelog-jobs && wrangler queues create changelog-jobs-dlq",
+    "tail": "wrangler tail",
+    "logs": "wrangler tail --format=pretty"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260317.1",

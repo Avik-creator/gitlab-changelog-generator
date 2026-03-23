@@ -1,9 +1,6 @@
-# Copy this file to .dev.vars for local development with `wrangler dev`
-# These are secrets — never commit .dev.vars to git
+# Copy to .dev.vars and fill in values for local dev.
+# For production, use: wrangler secret put <KEY>
 
-# Discord — get from https://discord.com/developers/applications
-DISCORD_BOT_TOKEN=your_discord_bot_token_here
-DISCORD_PUBLIC_KEY=your_discord_app_public_key_here
-
-# GitLab — Personal Access Token with api scope
-GITLAB_TOKEN=your_gitlab_personal_access_token_here
+DISCORD_BOT_TOKEN=your-discord-bot-token
+DISCORD_PUBLIC_KEY=your-discord-app-public-key
+GITLAB_TOKEN=your-gitlab-personal-access-token
