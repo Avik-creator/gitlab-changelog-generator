@@ -58,49 +58,109 @@ function groupByProject(mrs: EnrichedMR[]): Map<string, EnrichedMR[]> {
   return map;
 }
 
+// ─── Discord embed safety ─────────────────────────────────────────────────────
+
+const EMBED_FIELD_MAX  = 1024;
+const EMBED_TOTAL_MAX  = 5800; // Discord hard limit is 6000; keep a 200-char buffer
+const EMBED_FIELDS_MAX = 25;   // Discord hard limit
+
+type EmbedField = { name: string; value: string; inline: boolean };
+
+/**
+ * Strip any fields with blank name/value, cap at 25 fields, and ensure
+ * the total character count (title + description + all field names + values + footer)
+ * stays under Discord's 6000-char limit. Surplus fields are replaced with a
+ * single "… N more fields" notice so no content silently disappears.
+ */
+function safeEmbed(embed: {
+  title?: string;
+  description?: string;
+  color?: number;
+  fields?: EmbedField[];
+  footer?: { text: string };
+  timestamp?: string;
+}): object {
+  // Sanitise fields: drop empty, truncate values to field max
+  const raw = (embed.fields ?? []).filter(
+    (f) => f.name?.trim() && f.value?.trim()
+  ).map((f) => ({
+    ...f,
+    name:  f.name.slice(0, 256),
+    value: f.value.slice(0, EMBED_FIELD_MAX),
+  }));
+
+  // Count chars used by non-field parts
+  let used = (embed.title?.length ?? 0)
+    + (embed.description?.length ?? 0)
+    + (embed.footer?.text?.length ?? 0);
+
+  // Greedily admit fields until we'd breach the total or hit the 25-field cap
+  const admitted: EmbedField[] = [];
+  for (const f of raw) {
+    if (admitted.length >= EMBED_FIELDS_MAX) break;
+    const cost = f.name.length + f.value.length;
+    if (used + cost > EMBED_TOTAL_MAX) {
+      const remaining = raw.length - admitted.length;
+      admitted.push({
+        name:   "ℹ️ Truncated",
+        value:  `_${remaining} more field(s) omitted — embed character limit reached._`,
+        inline: false,
+      });
+      break;
+    }
+    used += cost;
+    admitted.push(f);
+  }
+
+  return {
+    embeds: [{
+      ...(embed.title       ? { title:       embed.title }       : {}),
+      ...(embed.description ? { description: embed.description } : {}),
+      ...(embed.color       !== undefined ? { color: embed.color } : {}),
+      fields: admitted,
+      ...(embed.footer    ? { footer:    embed.footer }    : {}),
+      ...(embed.timestamp ? { timestamp: embed.timestamp } : {}),
+    }],
+  };
+}
+
 // ─── Main changelog embed ─────────────────────────────────────────────────────
 
 export function buildChangelogEmbed(data: ChangelogData): object {
   const { format, mergedMRs, staleMRs, openMRs, filteredOutCount, reviewActivity } = data;
   const hasActivity = mergedMRs.length > 0;
-  const color = hasActivity ? (COLORS[format] ?? COLORS.changelog) : COLORS.empty;
-  const icon = FORMAT_ICONS[format] ?? "✨";
-  const scopeLabel = data.scope.type === "user"
+  const color       = hasActivity ? (COLORS[format] ?? COLORS.changelog) : COLORS.empty;
+  const icon        = FORMAT_ICONS[format] ?? "✨";
+  const scopeLabel  = data.scope.type === "user"
     ? `${data.displayName}'s`
     : `${data.displayName}`;
 
-  const fields: object[] = [];
+  const fields: EmbedField[] = [];
 
   // AI summary
-  if (data.aiSummary) {
-    fields.push({ name: `${icon} ${format.replace("-", " ").replace(/\b\w/g, (c) => c.toUpperCase())}`, value: truncate(data.aiSummary, 1024), inline: false });
+  if (data.aiSummary?.trim()) {
+    fields.push({
+      name:   `${icon} ${format.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`,
+      value:  truncate(data.aiSummary, EMBED_FIELD_MAX),
+      inline: false,
+    });
   }
 
-  // MRs grouped by project — paginated across multiple fields to show everything
+  // MRs grouped by project
   if (hasActivity) {
-    const grouped = groupByProject(mergedMRs);
-    let totalFiles = 0;
+    const grouped    = groupByProject(mergedMRs);
+    let   totalFiles = 0;
 
     for (const [projectName, mrs] of grouped) {
-      for (const f of mrFields(projectName, mrs)) fields.push(f);
+      for (const f of mrFields(projectName, mrs)) fields.push(f as EmbedField);
       for (const mr of mrs) {
         if (mr.diffStats) totalFiles += mr.diffStats.additions;
       }
     }
 
-    // Stats bar — detect whether we have real line counts or just file counts
-    const hasRealLines = mergedMRs.some((mr) => mr.diffStats && mr.diffStats.deletions > 0);
-    let totalAdds = 0, totalDels = 0;
-    for (const mr of mergedMRs) {
-      if (mr.diffStats) { totalAdds += mr.diffStats.additions; totalDels += mr.diffStats.deletions; }
-    }
-
+    // Stats bar
     const stats = [`**${mergedMRs.length}** MRs merged`];
-    if (hasRealLines) {
-      stats.push(`\`+${totalAdds}/-${totalDels}\` lines`);
-    } else if (totalFiles > 0) {
-      stats.push(`**${totalFiles}** files changed`);
-    }
+    if (totalFiles > 0) stats.push(`**${totalFiles}** files changed`);
     if (grouped.size > 1) stats.push(`**${grouped.size}** projects`);
     if (filteredOutCount > 0) stats.push(`${filteredOutCount} filtered out`);
 
@@ -109,48 +169,59 @@ export function buildChangelogEmbed(data: ChangelogData): object {
     const topLabels = [...labelCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([l]) => l);
     if (topLabels.length) stats.push(topLabels.join(", "));
 
-    fields.push({ name: "📊 Stats", value: stats.join(" · "), inline: false });
+    const statsValue = stats.join(" · ");
+    if (statsValue.trim()) {
+      fields.push({ name: "📊 Stats", value: statsValue, inline: false });
+    }
 
-    // Trend / comparison
+    // Trend
     if (data.trend) {
-      fields.push({ name: "📈 Trend", value: formatTrendLine(data.trend), inline: false });
+      const trendLine = formatTrendLine(data.trend);
+      if (trendLine?.trim()) {
+        fields.push({ name: "📈 Trend", value: trendLine, inline: false });
+      }
     }
   }
 
   // Review activity
   if (reviewActivity && reviewActivity.reviewsGiven > 0) {
     const parts = [`${reviewActivity.reviewsGiven} reviews`];
-    if (reviewActivity.approvals > 0) parts.push(`${reviewActivity.approvals} approvals`);
-    if (reviewActivity.commentsLeft > 0) parts.push(`${reviewActivity.commentsLeft} comments`);
-    if (reviewActivity.discussionsResolved > 0) parts.push(`${reviewActivity.discussionsResolved} resolved`);
+    if (reviewActivity.approvals > 0)           parts.push(`${reviewActivity.approvals} approvals`);
+    if (reviewActivity.commentsLeft > 0)         parts.push(`${reviewActivity.commentsLeft} comments`);
+    if (reviewActivity.discussionsResolved > 0)  parts.push(`${reviewActivity.discussionsResolved} resolved`);
     fields.push({ name: "🔍 Review Activity", value: parts.join(" · "), inline: false });
   }
 
   // Open / in-progress MRs
   if (openMRs.length > 0) {
-    const lines = openMRs.slice(0, 5).map((mr) =>
-      `• [${truncate(mr.title, 55)}](${mr.web_url}) · \`${mr.projectName}\``
-    ).join("\n");
-    fields.push({ name: `🔄 In Progress (${openMRs.length})`, value: truncate(lines, 1024), inline: false });
+    const lines = openMRs.slice(0, 5)
+      .map((mr) => `• [${truncate(mr.title, 55)}](${mr.web_url}) · \`${mr.projectName}\``)
+      .join("\n");
+    if (lines.trim()) {
+      fields.push({ name: `🔄 In Progress (${openMRs.length})`, value: truncate(lines, EMBED_FIELD_MAX), inline: false });
+    }
   }
 
   // Stale / blocked
   if (staleMRs.length > 0) {
     const lines = staleMRs.slice(0, 5).map(staleLine).join("\n");
     const extra = staleMRs.length > 5 ? `\n_+${staleMRs.length - 5} more_` : "";
-    fields.push({ name: `⚠️ Blockers (${staleMRs.length})`, value: truncate(lines + extra, 1024), inline: false });
+    const val   = (lines + extra).trim();
+    if (val) {
+      fields.push({ name: `⚠️ Blockers (${staleMRs.length})`, value: truncate(val, EMBED_FIELD_MAX), inline: false });
+    }
   }
 
-  return {
-    embeds: [{
-      title: `📋 ${scopeLabel} Changelog`,
-      description: hasActivity ? null : `_No activity found for ${data.dateRange.label}._`,
-      color,
-      fields,
-      footer: { text: `${data.weekISO || data.dateRange.label} · ${data.inputQuality} quality · GitLab Changelog Bot` },
-      timestamp: new Date().toISOString(),
-    }],
-  };
+  const footerText = `${data.weekISO || data.dateRange.label} · ${data.inputQuality} quality · GitLab Changelog Bot`;
+
+  return safeEmbed({
+    title:       `📋 ${scopeLabel} Changelog`,
+    description: hasActivity ? undefined : `_No activity found for ${data.dateRange.label}._`,
+    color,
+    fields,
+    footer:      { text: footerText },
+    timestamp:   new Date().toISOString(),
+  });
 }
 
 // ─── Stats embed ──────────────────────────────────────────────────────────────

@@ -42,7 +42,11 @@ async function postToChannel(channelId: string, body: object, botToken: string):
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`Discord post failed: ${res.status}`);
+  if (!res.ok) {
+    const errorBody = await res.text().catch(() => "(unreadable)");
+    console.error(`Discord post failed ${res.status}:`, errorBody);
+    throw new Error(`Discord post failed: ${res.status} — ${errorBody.slice(0, 300)}`);
+  }
 }
 
 export async function handleGenerate(

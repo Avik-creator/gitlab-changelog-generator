@@ -38,8 +38,13 @@ async function postToChannel(channelId: string, body: object, botToken: string):
       headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      const errorBody = await res.text().catch(() => "(unreadable)");
+      console.error(`Discord post failed ${res.status}:`, errorBody);
+    }
     return res.ok;
-  } catch {
+  } catch (err) {
+    console.error("Discord post threw:", err);
     return false;
   }
 }
