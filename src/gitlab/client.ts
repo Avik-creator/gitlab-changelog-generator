@@ -313,8 +313,8 @@ export class GitLabClient {
     const reviewedMRs: ReviewActivity["reviewedMRs"] = inRange.slice(0, 15).map((mr) => {
       let projectName = `Project ${mr.project_id}`;
       try {
-        const parts = new URL(mr.web_url).pathname.split("/-/")[0].split("/").filter(Boolean);
-        projectName = parts.at(-1) ?? projectName;
+        const seg = new URL(mr.web_url).pathname.split("/-/").at(0) ?? "";
+        projectName = seg.split("/").filter(Boolean).at(-1) ?? projectName;
       } catch { /* best-effort */ }
       return { title: mr.title, web_url: mr.web_url, projectName };
     });

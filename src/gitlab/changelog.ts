@@ -29,7 +29,7 @@ export async function buildChangelogForUser(
     .map((mr): import("../types").EnrichedMR => ({
       ...mr,
       projectName: (() => {
-        try { return new URL(mr.web_url).pathname.split("/-/")[0].split("/").filter(Boolean).at(-1) ?? mr.project_id.toString(); }
+        try { const seg = new URL(mr.web_url).pathname.split("/-/").at(0) ?? ""; return seg.split("/").filter(Boolean).at(-1) ?? mr.project_id.toString(); }
         catch { return `Project ${mr.project_id}`; }
       })(),
       projectUrl: "",
