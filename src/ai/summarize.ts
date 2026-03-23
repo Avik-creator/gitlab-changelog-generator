@@ -18,19 +18,17 @@ function verbosityInstruction(v: Verbosity | undefined): string {
 
 function buildMRContext(mrs: EnrichedMR[]): string {
   return mrs.map((mr) => {
-    // Show real line counts if available (deletions > 0), else file count
-    const diff = mr.diffStats
-      ? mr.diffStats.deletions > 0
-        ? ` (+${mr.diffStats.additions} lines / -${mr.diffStats.deletions} lines)`
-        : ` (${mr.diffStats.additions} files changed)`
+    const labels      = mr.labels.length ? ` [${mr.labels.join(", ")}]` : "";
+    const milestone   = mr.milestone ? ` | milestone: ${mr.milestone.title}` : "";
+    // File count comes free from changes_count in the list response — no extra API call
+    const filesInfo   = mr.diffStats?.additions
+      ? ` (${mr.diffStats.additions} files changed)`
       : "";
-    const labels = mr.labels.length ? ` [${mr.labels.join(", ")}]` : "";
-    const milestone = mr.milestone ? ` | milestone: ${mr.milestone.title}` : "";
     return (
-      `MR: ${mr.title}${diff}${labels}${milestone}\n` +
+      `MR: ${mr.title}${filesInfo}${labels}${milestone}\n` +
       `  Project: ${mr.projectName} | Author: ${mr.author.name}\n` +
       `  Branch: ${mr.source_branch} → ${mr.target_branch}\n` +
-      (mr.description ? `  Description: ${mr.description.slice(0, 300)}\n` : "")
+      (mr.description?.trim() ? `  Description: ${mr.description.trim()}\n` : "")
     );
   }).join("\n");
 }
