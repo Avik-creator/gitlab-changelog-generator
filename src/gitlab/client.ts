@@ -53,6 +53,22 @@ export class GitLabClient {
     return members.filter((m) => m.state === "active");
   }
 
+  /** Single-page member fetch for autocomplete (one API call, stays within 3s deadline). */
+  async getGroupMembersForAutocomplete(groupId: string): Promise<GitLabMember[]> {
+    const members = await this.fetch<GitLabMember[]>(`/groups/${groupId}/members/all`, {
+      per_page: "100",
+      sort: "asc",
+    });
+    return members.filter((m) => m.state === "active");
+  }
+
+  /** Single-page label fetch for autocomplete. */
+  async getGroupLabelsForAutocomplete(groupId: string): Promise<Array<{ name: string }>> {
+    return this.fetch<Array<{ name: string }>>(`/groups/${groupId}/labels`, {
+      per_page: "100",
+    });
+  }
+
   // ─── Merge requests (merged) ────────────────────────────────────────────────
 
   async getMergedMRsByAuthor(
@@ -266,13 +282,19 @@ export class GitLabClient {
 
   // ─── Review activity ────────────────────────────────────────────────────────
 
+  /**
+   * Review activity — 1-2 paginated API calls total, no per-MR notes fetching.
+   *
+   * Per-MR notes were the main source of unbounded API calls here (up to 20 extra
+   * requests for a busy reviewer). We now only fetch the reviewer MR list and parse
+   * project names from the web_url — no extra calls needed.
+   */
   async getReviewActivity(
     groupId: string,
     gitlabUsername: string,
     since: Date,
     until: Date
   ): Promise<ReviewActivity> {
-    // Fetch MRs where this user was a reviewer (not author)
     const fetchSince = new Date(since);
     fetchSince.setDate(fetchSince.getDate() - 30);
 
@@ -280,88 +302,71 @@ export class GitLabClient {
       reviewer_username: gitlabUsername,
       state: "merged",
       created_after: fetchSince.toISOString(),
-    }, 5);
+    }, 3);  // max 3 pages
 
     const inRange = allMRs.filter((mr) => {
       const mergedAt = new Date(mr.merged_at);
       return mergedAt >= since && mergedAt <= until;
     });
 
-    const projectCache = new Map<number, GitLabProject | null>();
-    let approvals = 0;
-    let commentsLeft = 0;
-    let discussionsResolved = 0;
-    const reviewedMRs: ReviewActivity["reviewedMRs"] = [];
-
-    for (const mr of inRange.slice(0, 20)) {
-      if (!projectCache.has(mr.project_id)) {
-        projectCache.set(mr.project_id, await this.getProject(mr.project_id));
-      }
-      const project = projectCache.get(mr.project_id);
-
-      reviewedMRs.push({
-        title: mr.title,
-        web_url: mr.web_url,
-        projectName: project?.name ?? `Project ${mr.project_id}`,
-      });
-
-      // Fetch notes to count comments and discussions
+    // Parse project name from web_url — free, no API call
+    const reviewedMRs: ReviewActivity["reviewedMRs"] = inRange.slice(0, 15).map((mr) => {
+      let projectName = `Project ${mr.project_id}`;
       try {
-        const notes = await this.fetch<GitLabNote[]>(
-          `/projects/${mr.project_id}/merge_requests/${mr.iid}/notes`,
-          { per_page: "100" }
-        );
-        for (const note of notes) {
-          if (note.author.username !== gitlabUsername) continue;
-          if (note.system) {
-            if (note.body.includes("approved")) approvals++;
-            continue;
-          }
-          commentsLeft++;
-          if (note.resolvable && note.resolved) discussionsResolved++;
-        }
-      } catch { /* best effort */ }
-    }
+        const parts = new URL(mr.web_url).pathname.split("/-/")[0].split("/").filter(Boolean);
+        if (parts.length > 0) projectName = parts[parts.length - 1];
+      } catch { /* best-effort */ }
+      return { title: mr.title, web_url: mr.web_url, projectName };
+    });
 
     return {
       username: gitlabUsername,
       displayName: gitlabUsername,
       reviewsGiven: inRange.length,
-      approvals,
-      commentsLeft,
-      discussionsResolved,
+      approvals: 0,          // would need per-MR notes — too expensive
+      commentsLeft: 0,
+      discussionsResolved: 0,
       reviewedMRs,
     };
   }
 
   // ─── Enriched MRs ──────────────────────────────────────────────────────────
 
+  /**
+   * Lite enrichment: O(unique_projects) API calls — never O(N) per MR.
+   *
+   * - Project name/URL resolved once per unique project_id (parallel, cached).
+   * - Commits skipped (titles + descriptions are enough for AI summarisation).
+   * - Diff stats derived from `changes_count` already present in the list response
+   *   (files changed, not lines — avoids one extra API call per MR).
+   *
+   * This is the only `enrichMRs` — the old per-MR commits/diffs version was the
+   * primary cause of "Too many subrequests" on the free plan.
+   */
   async enrichMRs(mrs: GitLabMR[]): Promise<EnrichedMR[]> {
     if (mrs.length === 0) return [];
-    const projectCache = new Map<number, GitLabProject | null>();
 
-    return Promise.all(
-      mrs.map(async (mr): Promise<EnrichedMR> => {
-        if (!projectCache.has(mr.project_id)) {
-          projectCache.set(mr.project_id, await this.getProject(mr.project_id));
-        }
-        const project = projectCache.get(mr.project_id);
-        const [commits, diffStats] = await Promise.all([
-          this.getCommitsForMR(mr.project_id, mr.iid),
-          this.getDiffStats(mr.project_id, mr.iid),
-        ]);
-
-        const isRevert = /^Revert\s+"/i.test(mr.title) || mr.source_branch.startsWith("revert-");
-
-        return {
-          ...mr,
-          projectName: project?.name ?? `Project ${mr.project_id}`,
-          projectUrl: project?.web_url ?? "",
-          commits,
-          diffStats,
-          isRevert,
-        };
+    // Resolve unique projects in parallel — typically 1-5 calls total, not N
+    const uniqueIds = [...new Set(mrs.map((m) => m.project_id))];
+    const projectMap = new Map<number, GitLabProject | null>();
+    await Promise.all(
+      uniqueIds.map(async (id) => {
+        projectMap.set(id, await this.getProject(id));
       })
     );
+
+    return mrs.map((mr): EnrichedMR => {
+      const project = projectMap.get(mr.project_id);
+      const filesChanged = parseInt(mr.changes_count ?? "0", 10) || 0;
+      const isRevert = /^Revert\s+"/i.test(mr.title) || mr.source_branch.startsWith("revert-");
+      return {
+        ...mr,
+        projectName: project?.name ?? `Project ${mr.project_id}`,
+        projectUrl:  project?.web_url ?? "",
+        commits:  [],          // not fetched — saves N API calls
+        diffStats: filesChanged > 0 ? { additions: filesChanged, deletions: 0 } : null,
+        isRevert,
+      };
+    });
   }
 }

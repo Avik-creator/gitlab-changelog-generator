@@ -19,12 +19,29 @@ export async function buildChangelogForUser(
 ): Promise<ChangelogData> {
   const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
 
-  const [rawMRs, staleMRs, openMRsRaw, reviewActivity] = await Promise.all([
+  // Open MRs: use raw MRs cast to EnrichedMR (no extra enrichment calls)
+  const rawOpenMRs = await client.getOpenMRsByAuthor(env.GITLAB_GROUP_ID, gitlabUsername)
+    .catch(() => [] as import("../types").GitLabMR[]);
+
+  const openMRsRaw = rawOpenMRs
+    .filter((m) => !m.draft)
+    .slice(0, 10)
+    .map((mr): import("../types").EnrichedMR => ({
+      ...mr,
+      projectName: (() => {
+        try { return new URL(mr.web_url).pathname.split("/-/")[0].split("/").filter(Boolean).slice(-1)[0] ?? mr.project_id.toString(); }
+        catch { return `Project ${mr.project_id}`; }
+      })(),
+      projectUrl: "",
+      commits: [],
+      diffStats: null,
+      isRevert: false,
+    }));
+
+  const [rawMRs, staleMRs, reviewActivity] = await Promise.all([
     client.getMergedMRsByAuthor(env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until)
       .then((mrs) => client.enrichMRs(mrs)),
     client.getStaleMRs(env.GITLAB_GROUP_ID, [gitlabUsername]),
-    client.getOpenMRsByAuthor(env.GITLAB_GROUP_ID, gitlabUsername)
-      .then((mrs) => client.enrichMRs(mrs.filter((m) => !m.draft).slice(0, 10))),
     client.getReviewActivity(env.GITLAB_GROUP_ID, gitlabUsername, dateRange.since, dateRange.until)
       .catch(() => null),
   ]);
@@ -90,8 +107,6 @@ export async function buildChangelogForProject(
   const { passed: mergedMRs, filteredOut } = applyFilters(enriched, filters);
   const inputQuality = assessInputQuality(mergedMRs);
 
-  const usernames = [...new Set(mergedMRs.map((mr) => mr.author.username))];
-
   return {
     gitlabUsername: "",
     displayName: project.name,
@@ -99,7 +114,7 @@ export async function buildChangelogForProject(
     dateRange,
     mergedMRs,
     filteredOutCount: filteredOut,
-    staleMRs: await client.getStaleMRs(env.GITLAB_GROUP_ID, usernames),
+    staleMRs: [],   // not fetched for project scope — would multiply subrequests per author
     openMRs: [],
     reviewActivity: null,
     aiSummary: "",

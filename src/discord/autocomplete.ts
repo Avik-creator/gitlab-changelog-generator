@@ -39,10 +39,19 @@ function filterChoices(choices: AutocompleteChoice[], query: string): Autocomple
 
 /** GitLab group members — for the `gitlab` string field */
 async function suggestGitlabUsers(env: Env, query: string): Promise<AutocompleteChoice[]> {
-  const members = await cached(env.USERS_KV, `members:${env.GITLAB_GROUP_ID}`, async () => {
+  // Single-page fetch with KV cache — avoids multi-page pagination inside autocomplete's 3s window
+  const cacheKey = `members:${env.GITLAB_GROUP_ID}`;
+  const raw = await env.USERS_KV.get(`ac:${cacheKey}`).catch(() => null);
+
+  let members: Array<{ name: string; username: string; state: string }>;
+  if (raw) {
+    members = JSON.parse(raw);
+  } else {
     const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
-    return client.getGroupMembers(env.GITLAB_GROUP_ID, true);
-  });
+    members = await client.getGroupMembersForAutocomplete(env.GITLAB_GROUP_ID);
+    await env.USERS_KV.put(`ac:${cacheKey}`, JSON.stringify(members), { expirationTtl: CACHE_TTL })
+      .catch(() => { /* non-fatal */ });
+  }
 
   const choices: AutocompleteChoice[] = members.map((m) => ({
     name: `${m.name} (@${m.username})`,
@@ -82,10 +91,18 @@ async function suggestProjects(env: Env, query: string): Promise<AutocompleteCho
 
 /** GitLab group labels — for the `label` field */
 async function suggestLabels(env: Env, query: string): Promise<AutocompleteChoice[]> {
-  const labels = await cached(env.USERS_KV, `labels:${env.GITLAB_GROUP_ID}`, async () => {
+  const cacheKey = `labels:${env.GITLAB_GROUP_ID}`;
+  const raw = await env.USERS_KV.get(`ac:${cacheKey}`).catch(() => null);
+
+  let labels: Array<{ name: string }>;
+  if (raw) {
+    labels = JSON.parse(raw);
+  } else {
     const client = new GitLabClient(env.GITLAB_BASE_URL, env.GITLAB_TOKEN);
-    return client.getGroupLabels(env.GITLAB_GROUP_ID);
-  });
+    labels = await client.getGroupLabelsForAutocomplete(env.GITLAB_GROUP_ID);
+    await env.USERS_KV.put(`ac:${cacheKey}`, JSON.stringify(labels), { expirationTtl: CACHE_TTL })
+      .catch(() => { /* non-fatal */ });
+  }
 
   const choices: AutocompleteChoice[] = labels.map((l) => ({
     name: l.name,
