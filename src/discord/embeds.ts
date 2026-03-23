@@ -18,10 +18,25 @@ function truncate(text: string, max: number): string {
 }
 
 function mrLine(mr: EnrichedMR): string {
-  const diff = mr.diffStats ? ` \`+${mr.diffStats.additions}/-${mr.diffStats.deletions}\`` : "";
-  const labels = mr.labels.length ? ` · ${mr.labels.slice(0, 3).join(", ")}` : "";
+  const files = mr.diffStats?.additions ? ` \`${mr.diffStats.additions}f\`` : "";
+  const labels = mr.labels.length ? ` · ${mr.labels.slice(0, 2).join(", ")}` : "";
   const milestone = mr.milestone ? ` 🏁 ${mr.milestone.title}` : "";
-  return `• [${truncate(mr.title, 55)}](${mr.web_url})${diff}${labels}${milestone}`;
+  return `• [${truncate(mr.title, 52)}](${mr.web_url})${files}${labels}${milestone}`;
+}
+
+/** Split a list of MRs into multiple embed fields to stay within Discord's 1024-char limit. */
+function mrFields(projectName: string, mrs: EnrichedMR[]): object[] {
+  const CHUNK = 10;
+  const fields: object[] = [];
+  for (let i = 0; i < mrs.length; i += CHUNK) {
+    const chunk = mrs.slice(i, i + CHUNK);
+    const suffix = mrs.length > CHUNK
+      ? ` (${i + 1}–${Math.min(i + CHUNK, mrs.length)} of ${mrs.length})`
+      : ` (${mrs.length})`;
+    const name = i === 0 ? `📦 ${projectName}${suffix}` : `📦 ${projectName} ${suffix}`;
+    fields.push({ name, value: chunk.map(mrLine).join("\n"), inline: false });
+  }
+  return fields;
 }
 
 function staleLine(mr: GitLabStaleMR): string {
@@ -56,25 +71,21 @@ export function buildChangelogEmbed(data: ChangelogData): object {
     fields.push({ name: `${icon} ${format.replace("-", " ").replace(/\b\w/g, (c) => c.toUpperCase())}`, value: truncate(data.aiSummary, 1024), inline: false });
   }
 
-  // MRs grouped by project
+  // MRs grouped by project — paginated across multiple fields to show everything
   if (hasActivity) {
     const grouped = groupByProject(mergedMRs);
-    let totalAdds = 0, totalDels = 0;
+    let totalFiles = 0;
 
     for (const [projectName, mrs] of grouped) {
-      fields.push({
-        name: `📦 ${projectName} (${mrs.length})`,
-        value: truncate(mrs.map(mrLine).join("\n"), 1024),
-        inline: false,
-      });
+      for (const f of mrFields(projectName, mrs)) fields.push(f);
       for (const mr of mrs) {
-        if (mr.diffStats) { totalAdds += mr.diffStats.additions; totalDels += mr.diffStats.deletions; }
+        if (mr.diffStats) totalFiles += mr.diffStats.additions;
       }
     }
 
     // Stats bar
     const stats = [`**${mergedMRs.length}** MRs merged`];
-    if (totalAdds + totalDels > 0) stats.push(`\`+${totalAdds}/-${totalDels}\``);
+    if (totalFiles > 0) stats.push(`**${totalFiles}** files changed`);
     if (grouped.size > 1) stats.push(`**${grouped.size}** projects`);
     if (filteredOutCount > 0) stats.push(`${filteredOutCount} filtered out`);
 

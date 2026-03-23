@@ -142,32 +142,56 @@ function detectReverts(mrs: EnrichedMR[]): Map<number, string> {
 }
 
 /**
- * Assess input quality based on commit message patterns.
- * Used to decide whether AI summary is trustworthy or we should fall back.
+ * Assess input quality.
+ *
+ * When commits are available, assess their message quality.
+ * When commits are empty (lite enrichment path), fall back to assessing MR titles —
+ * which is always available and is a perfectly good signal.
  */
 export function assessInputQuality(mrs: EnrichedMR[]): "high" | "medium" | "low" {
   if (mrs.length === 0) return "low";
 
   const allCommits = mrs.flatMap((mr) => mr.commits);
-  if (allCommits.length === 0) return "low";
 
-  // Garbage patterns: single-word, too short, meaningless
+  // Lite enrichment path: no commits fetched — use MR titles instead
+  if (allCommits.length === 0) {
+    return assessTitleQuality(mrs);
+  }
+
   const garbagePatterns = [
     /^(fix|wip|test|update|again|done|stuff|tmp|temp|asdf|xxx)$/i,
-    /^.{1,5}$/,             // 5 chars or less
+    /^.{1,5}$/,
     /^Merge branch/i,
     /^initial commit$/i,
   ];
 
   let garbageCount = 0;
   for (const commit of allCommits) {
-    const title = commit.title.trim();
-    if (garbagePatterns.some((p) => p.test(title))) garbageCount++;
+    if (garbagePatterns.some((p) => p.test(commit.title.trim()))) garbageCount++;
+  }
+  const ratio = garbageCount / allCommits.length;
+  if (ratio > 0.6) return "low";
+  if (ratio > 0.3) return "medium";
+  return "high";
+}
+
+function assessTitleQuality(mrs: EnrichedMR[]): "high" | "medium" | "low" {
+  // Short/vague MR titles that give the AI nothing to work with
+  const garbagePatterns = [
+    /^.{1,8}$/,                         // 8 chars or fewer
+    /^(fix|wip|update|test|patch|misc)$/i,
+    /^Merge (branch|request|pull)/i,
+    /^Revert "/i,
+    /^draft/i,
+  ];
+
+  let garbageCount = 0;
+  for (const mr of mrs) {
+    if (garbagePatterns.some((p) => p.test(mr.title.trim()))) garbageCount++;
   }
 
-  const garbageRatio = garbageCount / allCommits.length;
-
-  if (garbageRatio > 0.6) return "low";
-  if (garbageRatio > 0.3) return "medium";
+  const ratio = garbageCount / mrs.length;
+  if (ratio > 0.7) return "low";
+  if (ratio > 0.4) return "medium";
   return "high";
 }

@@ -115,27 +115,22 @@ function buildPrompt(data: ChangelogData, mode: DigestMode): { system: string; u
 function buildDeterministicSummary(data: ChangelogData): string {
   const { mergedMRs, staleMRs, openMRs } = data;
   const projects = [...new Set(mergedMRs.map((mr) => mr.projectName))];
-  let totalAdds = 0, totalDels = 0;
+  let totalFiles = 0;
   for (const mr of mergedMRs) {
-    if (mr.diffStats) { totalAdds += mr.diffStats.additions; totalDels += mr.diffStats.deletions; }
+    if (mr.diffStats) totalFiles += mr.diffStats.additions;
   }
 
-  const lines = [
-    `**${mergedMRs.length}** MR${mergedMRs.length !== 1 ? "s" : ""} merged across **${projects.length}** project${projects.length !== 1 ? "s" : ""}`,
-    totalAdds + totalDels > 0 ? `\`+${totalAdds}/-${totalDels}\` lines changed` : null,
+  const lines: (string | null)[] = [
+    `**${mergedMRs.length}** MR${mergedMRs.length !== 1 ? "s" : ""} merged` +
+    (projects.length > 1 ? ` across **${projects.length}** projects` : ` in **${projects[0] ?? "unknown"}**`),
+    totalFiles > 0 ? `**${totalFiles}** files changed` : null,
     "",
-    "**Top MRs:**",
-    ...mergedMRs.slice(0, 5).map((mr) => `• [${mr.title}](${mr.web_url}) — ${mr.projectName}`),
+    "**Top changes:**",
+    ...mergedMRs.slice(0, 5).map((mr) => `• [${mr.title}](${mr.web_url})`),
   ];
 
-  if (staleMRs.length > 0) {
-    lines.push("", `**⚠️ ${staleMRs.length} stale MR(s)** needing attention`);
-  }
-  if (openMRs.length > 0) {
-    lines.push("", `**🔄 ${openMRs.length} open MR(s)** in progress`);
-  }
-
-  lines.push("", "_AI summary skipped — commit messages too noisy for a reliable narrative._");
+  if (staleMRs.length > 0) lines.push("", `**⚠️ ${staleMRs.length} stale MR(s)** needing attention`);
+  if (openMRs.length > 0) lines.push("", `**🔄 ${openMRs.length} open MR(s)** in progress`);
 
   return lines.filter((l) => l !== null).join("\n");
 }
@@ -147,10 +142,11 @@ export async function generateAISummary(
   data: ChangelogData,
   mode: DigestMode = "changelog"
 ): Promise<string> {
-  // Confidence gate: if input quality is low, fall back to deterministic
+  // Confidence gate: only skip AI for truly low quality (all garbage titles, no content)
   if (data.inputQuality === "low" && data.mergedMRs.length > 0) {
     return buildDeterministicSummary(data);
   }
+  // For medium/high quality, always attempt AI (MR titles alone are enough context)
 
   const { system, user } = buildPrompt(data, mode);
 
